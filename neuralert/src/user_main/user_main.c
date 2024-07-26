@@ -187,6 +187,8 @@ int config_pin_mux(void)
  */
 int user_main(char init_state)
 {
+	vTaskDelay(10);
+
     int	status = 0;
 	__time64_t my_wakeup_msec;
 	unsigned long long time_old;
