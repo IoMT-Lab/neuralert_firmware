@@ -187,6 +187,8 @@ int config_pin_mux(void)
  */
 int user_main(char init_state)
 {
+	// Brief delay needed to prevent garbage UART output while
+	// the pins are being configured
 	vTaskDelay(10);
 
     int	status = 0;
