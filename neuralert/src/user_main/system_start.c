@@ -152,12 +152,8 @@ void config_ext_wakeup_resource(void)
     UINT32 intr_src, ioctldata;
 
     RTC_IOCTL(RTC_GET_RTC_CONTROL_REG, &intr_src);
-#if defined ( __TCP_CLIENT_SLEEP2_SAMPLE__ )
     intr_src &= ~(WAKEUP_INTERRUPT_ENABLE(1));  // Set Wakeup interrupt enable bit (active high)
 	intr_src &= ~(WAKEUP_POLARITY(1));          // Set polarity to rising edge (active high)
-#else
-    intr_src |= WAKEUP_INTERRUPT_ENABLE(1) | WAKEUP_POLARITY(1);
-#endif // __TCP_CLIENT_SLEEP2_SAMPLE__
 	RTC_IOCTL(RTC_SET_RTC_CONTROL_REG, &intr_src);
 
 
