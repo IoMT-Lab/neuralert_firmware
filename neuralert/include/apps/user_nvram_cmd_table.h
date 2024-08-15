@@ -39,6 +39,8 @@
 //JW: Added this flag for run 0 vs. run 1 implementation
 /// NVRAM name of MQTT run flag
 #define MQTT_NVRAM_CONFIG_RUN_FLAG		"MQTT_RUN_FLAG"
+/// NVRAM name for int-based run flag
+#define NVRAM_CONFIG_RUN_FLAG           "RUN_FLAG"
 
 /// NVRAM string value structure
 typedef struct _user_conf_str {
@@ -119,7 +121,9 @@ typedef enum {
     DA16X_CONF_STR_ATCMD_NW_TR_PEER_IPADDR_9,
 #endif // (__SUPPORT_ATCMD_MULTI_SESSION__)
 
-	DA16X_CONF_STR_MQTT_RUN_FLAG, //JW: ADDED to allow for run 0 and run 1
+    // Legacy value retained for backwards compatibility, 
+    // use DA16X_CONF_INT_RUN_FLAG instead
+	LEGACY_DA16X_CONF_STR_MQTT_RUN_FLAG, 
 
     DA16X_CONF_STR_FINAL_MAX
 } DA16X_USER_CONF_STR;
@@ -223,6 +227,7 @@ typedef enum {
     DA16X_CONF_INT_OTA_TLS_AUTHMODE,
 #endif //(__SUPPORT_OTA__)
 
+    DA16X_CONF_INT_RUN_FLAG,
     DA16X_CONF_INT_FINAL_MAX
 } DA16X_USER_CONF_INT;
 

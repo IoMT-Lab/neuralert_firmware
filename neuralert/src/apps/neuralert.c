@@ -8357,7 +8357,7 @@ static void user_deinit(void)
 	// mode when we restart.  This preserves the initial part of the
 	// log and makes sure we don't start running again.
 	user_log_event("*** Setting runflag=0 ***");
-	status = user_set_str(DA16X_CONF_STR_MQTT_RUN_FLAG, "runFlag=0", 0);
+	status = user_set_int(DA16X_CONF_INT_RUN_FLAG, 0, 0);
 
 	// Put total run time in the log
 	user_log_run_time();
@@ -8431,7 +8431,7 @@ void tcp_client_sleep2_sample(void *param)
 
 	uint32_t ulNotifiedValue;
 	UCHAR quit = FALSE;
-	char tempstr[50];  // working temp string
+	int storedRunFlag;
 	UCHAR eventreceived;  // result from event waiting
 	unsigned char fiforeg[2];
 	UINT32 i2c_status;
@@ -8478,13 +8478,16 @@ void tcp_client_sleep2_sample(void *param)
 	 * mechanism is not up and running.
 	 *
 	 */
-	tempstr[0] = 0x00;
-	strcpy(tempstr,"not set");
-	user_get_str(DA16X_CONF_STR_MQTT_RUN_FLAG,tempstr);
-	PRINTF("===========>NVRam runFlag: [%s]\r\n",tempstr);
-	if(strcmp(tempstr,"runFlag=1") == 0)
-	{
-		runFlag = 1;
+
+	user_get_int(DA16X_CONF_INT_RUN_FLAG, &storedRunFlag);
+	PRINTF("===========>NVRam runFlag: [%i]\r\n",storedRunFlag);
+
+	if (storedRunFlag < 0) {
+		// This *should* be impossible, due to the additional logic for retrieving the config
+		PRINTF("Run flag set to impossible value\n");
+	} else {
+		// We have made sure the value isn't negative, so copy it over to the global flag
+		runFlag = storedRunFlag;
 	}
 
 	if(runFlag == 0)

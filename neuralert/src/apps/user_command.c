@@ -2194,8 +2194,7 @@ int i2cRead(int addr, uint8_t *data, int length)
 
 void cmd_run(int argc, char *argv[])
 {
-	int status;
-	char str[20], str1[40];
+	int storedRunFlag;
 
 	if (argc > 2)
 	{
@@ -2205,20 +2204,11 @@ void cmd_run(int argc, char *argv[])
 	if (argc == 2)
 	{
 		runFlag = strtol(argv[1], NULL, 10) & 0x1;
-		if(runFlag)
-		{
-			status = user_set_str(DA16X_CONF_STR_MQTT_RUN_FLAG, "runFlag=1", 0);
-		}
-		else
-		{
-			status = user_set_str(DA16X_CONF_STR_MQTT_RUN_FLAG, "runFlag=0", 0);
-		}
-
+		user_set_int(DA16X_CONF_INT_RUN_FLAG, runFlag, 0);
 	}
 	PRINTF("\n### run CMD : %d ###\n\n", runFlag);
-	user_get_str(DA16X_CONF_STR_MQTT_RUN_FLAG,str);
-	sprintf(str1,"NVRam runFlag: %s\r\n",str);
-	PRINTF(str1);
+	user_get_int(DA16X_CONF_INT_RUN_FLAG, &storedRunFlag);
+	PRINTF("NVRam runFlag: %i\r\n",storedRunFlag);
 }
 
 
