@@ -5,6 +5,7 @@ set(NEURALERT_TARGET_INCLUDE
     ${CMAKE_CURRENT_SOURCE_DIR}/include/apps
     ${CMAKE_CURRENT_SOURCE_DIR}/include/user_main
     ${CMAKE_CURRENT_SOURCE_DIR}/include/config
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/sdk_overrides
     ${CMAKE_CURRENT_SOURCE_DIR}/include/sdk_support
     ${CMAKE_CURRENT_SOURCE_DIR}/include/drivers
 )
