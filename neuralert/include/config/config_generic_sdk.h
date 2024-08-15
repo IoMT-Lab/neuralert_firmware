@@ -92,7 +92,7 @@
     //   user can change call-back function
     //    : static void rtc_brown_cb(void) in ~/apps/da16200/get_started/src/user_main/system_start.c
     //
-    #undef __SET_BOR_CIRCUIT__
+    #define __SET_BOR_CIRCUIT__
 
     //
     // Enable/Disable RF antenna share for Wi-Fi & BT co-existence
