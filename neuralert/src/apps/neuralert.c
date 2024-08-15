@@ -8353,12 +8353,6 @@ static void user_deinit(void)
 	/* Delete all resources */
 	PRINTF("%s\n", __func__);
 
-	// Set the nonvol RUN flag so that we enter command / provisioning
-	// mode when we restart.  This preserves the initial part of the
-	// log and makes sure we don't start running again.
-	user_log_event("*** Setting runflag=0 ***");
-	status = user_set_int(DA16X_CONF_INT_RUN_FLAG, 0, 0);
-
 	// Put total run time in the log
 	user_log_run_time();
 
