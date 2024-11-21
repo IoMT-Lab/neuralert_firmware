@@ -1,6 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
 
-set(TOOLCHAIN_PATH ${CMAKE_SOURCE_DIR}/arm-toolchain/gcc-arm-none-eabi-10.3-2021.10)
+if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
+  set(TOOLCHAIN_PATH ${CMAKE_SOURCE_DIR}/arm-toolchain/linux-x86_64/gcc-arm-none-eabi-10.3-2021.10)
+elseif(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
+  set(TOOLCHAIN_PATH ${CMAKE_SOURCE_DIR}/arm-toolchain/mac-x86_64/gcc-arm-none-eabi-10.3-2021.10)
+else()
+
+endif()
 
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/da16200_sdk/cmake)
 set(CMAKE_TOOLCHAIN_FILE da16200_sdk/cmake/da16200-toolchain.cmake)
