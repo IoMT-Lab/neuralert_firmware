@@ -564,11 +564,6 @@ SemaphoreHandle_t AB_semaphore = NULL;
  */
 SemaphoreHandle_t Flash_semaphore = NULL;
 /*
- * Semaphore to coordinate between users of the log holding area
- * in retention memory.
- */
-SemaphoreHandle_t user_log_semaphore = NULL;
-/*
  * Semaphore to coordinate between users of the transmission statistics.
  * This is used so we don't accidentally execute simultaneous read/writes
  */
@@ -661,6 +656,7 @@ static int get_log_oldest_location(void);
 static int get_log_store_location(void);
 static void log_current_time(UCHAR *PrefixString);
 static void clear_MQTT_stat(unsigned int *stat);
+unsigned int get_MQTT_stat(unsigned int *stat);
 static void increment_MQTT_stat(unsigned int *stat);
 static void timesync_snapshot(void);
 
@@ -990,7 +986,7 @@ int user_factory_reset_btn_onetouch(void)
 void user_terminate_transmission_event(void)
 {
 	if (xTask) {
-		xTaskNotifyIndexed(xTask, 0, USER__TRANSMISSION_EVENT, eSetBits);
+		xTaskNotifyIndexed(xTask, 0, USER_TERMINATE_TRANSMISSION_EVENT, eSetBits);
 	}
 }
 
@@ -2140,6 +2136,7 @@ void user_terminate_transmit(void)
 	da16x_sys_watchdog_notify(sys_wdog_id);
 
 	system_control_wlan_enable(FALSE);
+
 	// The following delay (vTaskDelay(10)) is necessary to prevent an LmacMain hard fault.  LmacMain is generated in a pre-compile
 	// library in the sdk. It seems like the wifi disconnect returns before all the resources are shutdown, and if
 	// we proceed without delay to triggering a sleep event, a hard fault will result.
@@ -2147,10 +2144,16 @@ void user_terminate_transmit(void)
 	// No logging caught what caused the hard fault.  Our best guess is that the accelerometer task (running at a higher priority)
 	// was triggered during the vTaskDelay(10); which kept running while the accelerometer was processed.  The accelerometer might have been
 	// blocking the LmacMain tasks such that the following delay was made moot.  Then the radio was turned off prior to graceful shutdown.
-	// To solve the hypothesized problem above, we have increased the delay to 1 second -- which is more than enough time for the
+	// To solve the hypothesized problem above, we now read the pUserData-> -- which is more than enough time for the
 	// accelerometer task to complete and give the processor back to LmacMain to shut down before the rf is turned off.
-	//
-	vTaskDelay(pdMS_TO_TICKS(1000)); // This delay is NECESSARY -- DO NOT REMOVE (see description above)
+
+	unsigned int temp1 = get_MQTT_stat(&(pUserData->ACCEL_read_count));
+	vTaskDelay(10); // This delay is NECESSARY -- DO NOT REMOVE (see description above)
+	da16x_sys_watchdog_notify(sys_wdog_id);
+	unsigned int temp2 = get_MQTT_stat(&(pUserData->ACCEL_read_count));
+	if (temp1 != temp2) {
+		vTaskDelay(10); // This delay is also likely necessary to prevent the rare event also described above
+	}
 
 	// turn off rf
     da16x_sys_watchdog_notify(sys_wdog_id);
@@ -3508,299 +3511,6 @@ static int user_process_clear_AB(void)
 
 }
 
-/**
- *******************************************************************************
- * @brief Process to retrieve the user log buffer management
- * next-write location, making sure it's done with exclusive access
- *  Returns -1 if unable to gain exclusive access
- *  returns the log next write position otherwise
- *
- *******************************************************************************
- */
-static int get_log_store_location(void)
-{
-	int return_value = -1;
-
-	// Figure out what is stored in the flash log area
-	if(user_log_semaphore != NULL )
-	{
-		/* See if we can obtain the semaphore.  If the semaphore is not
-			available wait 10 ticks to see if it becomes free. */
-		if( xSemaphoreTake( user_log_semaphore, ( TickType_t ) 10 ) == pdTRUE )
-		{
-			/* We were able to obtain the semaphore and can now access the
-				shared resource. */
-
-			// Where our entry will go
-			return_value = pUserData->next_log_entry_write_position;
-
-			/* We have finished accessing the shared resource.  Release the
-				semaphore. */
-			xSemaphoreGive( user_log_semaphore );
-		}
-		else
-		{
-			PRINTF("\n ***archive_one_log_entry: Unable to obtain log semaphore\n");
-		}
-	}
-	else
-	{
-		PRINTF("\n ***archive_one_log_entry: semaphore not initialized!\n");
-	}
-
-	return return_value;
-}
-
-/**
- *******************************************************************************
- * @brief Process to retrieve the flash user log oldest location,
- * making sure it's done with exclusive access
- *  Returns -1 if unable to gain exclusive access
- *  returns the holding log oldest position otherwise
- *
- *******************************************************************************
- */
-static int get_log_oldest_location(void)
-{
-	int return_value = -1;
-
-	if(user_log_semaphore != NULL )
-	{
-		/* See if we can obtain the semaphore.  If the semaphore is not
-	        available wait 10 ticks to see if it becomes free. */
-		if( xSemaphoreTake( user_log_semaphore, ( TickType_t ) 10 ) == pdTRUE )
-		{
-			/* We were able to obtain the semaphore and can now access the
-	            shared resource. */
-			return_value = pUserData->oldest_log_entry_position;
-
-			/* We have finished accessing the shared resource.  Release the
-	            semaphore. */
-			xSemaphoreGive( user_log_semaphore );
-		}
-		else
-		{
-			PRINTF("\n ***Unable to obtain user log semaphore\n");
-		}
-	}
-	else
-	{
-		PRINTF("\n ***user log semaphore not initialized!\n");
-	}
-
-	return return_value;
-
-}
-
-/**
- *******************************************************************************
- * @brief Process to retrieve the user holding log next write location,
- * making sure it's done with exclusive access
- *  Returns -1 if unable to gain exclusive access
- *  returns the log next write position otherwise
- *
- *******************************************************************************
- */
-static int get_holding_log_next_write_location(void)
-{
-	int return_value = -1;
-
-	if(user_log_semaphore != NULL )
-	{
-		/* See if we can obtain the semaphore.  If the semaphore is not
-	        available wait 10 ticks to see if it becomes free. */
-		if( xSemaphoreTake( user_log_semaphore, ( TickType_t ) 10 ) == pdTRUE )
-		{
-			/* We were able to obtain the semaphore and can now access the
-	            shared resource. */
-			return_value = pUserData->next_log_holding_position;
-
-			/* We have finished accessing the shared resource.  Release the
-	            semaphore. */
-			xSemaphoreGive( user_log_semaphore );
-		}
-		else
-		{
-			PRINTF("\n ***Unable to obtain user log semaphore\n");
-		}
-	}
-	else
-	{
-		PRINTF("\n ***user log semaphore not initialized!\n");
-	}
-
-	return return_value;
-
-}
-
-/**
- *******************************************************************************
- * @brief Process to retrieve the user holding log oldest location,
- * making sure it's done with exclusive access
- *  Returns -1 if unable to gain exclusive access
- *  returns the holding log oldest position otherwise
- *
- *******************************************************************************
- */
-static int get_holding_log_oldest_location(void)
-{
-	int return_value = -1;
-
-	if(user_log_semaphore != NULL )
-	{
-		/* See if we can obtain the semaphore.  If the semaphore is not
-	        available wait 10 ticks to see if it becomes free. */
-		if( xSemaphoreTake( user_log_semaphore, ( TickType_t ) 10 ) == pdTRUE )
-		{
-			/* We were able to obtain the semaphore and can now access the
-	            shared resource. */
-			return_value = pUserData->oldest_log_holding_position;
-
-			/* We have finished accessing the shared resource.  Release the
-	            semaphore. */
-			xSemaphoreGive( user_log_semaphore );
-		}
-		else
-		{
-			PRINTF("\n ***Unable to obtain user log semaphore\n");
-		}
-	}
-	else
-	{
-		PRINTF("\n ***user log semaphore not initialized!\n");
-	}
-
-	return return_value;
-
-}
-/**
- *******************************************************************************
- * @brief Process to update the user holding log management
- * oldest location, making sure it's done with exclusive access
- *
- *  Returns FALSE if unable to gain exclusive access
- *  returns TRUE otherwise
- *******************************************************************************
- */
-static int update_holding_log_oldest_location(int new_location)
-{
-	int return_value = pdFALSE;
-
-	if(user_log_semaphore != NULL )
-	{
-		/* See if we can obtain the semaphore.  If the semaphore is not
-			available wait 10 ticks to see if it becomes free. */
-		if( xSemaphoreTake( user_log_semaphore, ( TickType_t ) 10 ) == pdTRUE )
-		{
-//			PRINTF("****** update_holding_log_oldest_location: new value %d ******\n",
-//					new_location);
-			/* We were able to obtain the semaphore and can now access the
-				shared resource. */
-			pUserData->oldest_log_holding_position = new_location;;
-
-			/* We have finished accessing the shared resource.  Release the
-				semaphore. */
-			xSemaphoreGive( user_log_semaphore );
-			return_value = pdTRUE;
-		}
-		else
-		{
-			PRINTF("\n ***Unable to obtain user log semaphore\n");
-		}
-	}
-	else
-	{
-		PRINTF("\n ***user log semaphore not initialized!\n");
-	}
-
-	return return_value;
-
-}
-
-/**
- *******************************************************************************
- * @brief Process to update the user log management
- * oldest location, making sure it's done with exclusive access
- *
- *  Returns FALSE if unable to gain exclusive access
- *  returns TRUE otherwise
- *******************************************************************************
- */
-static int update_log_oldest_location(int new_location)
-{
-	int return_value = pdFALSE;
-
-	if(user_log_semaphore != NULL )
-	{
-		/* See if we can obtain the semaphore.  If the semaphore is not
-			available wait 10 ticks to see if it becomes free. */
-		if( xSemaphoreTake( user_log_semaphore, ( TickType_t ) 10 ) == pdTRUE )
-		{
-			PRINTF("****** update_log_oldest_location: new value %d ******\n", new_location);
-			/* We were able to obtain the semaphore and can now access the
-				shared resource. */
-			pUserData->oldest_log_entry_position = new_location;;
-
-			/* We have finished accessing the shared resource.  Release the
-				semaphore. */
-			xSemaphoreGive( user_log_semaphore );
-			return_value = pdTRUE;
-		}
-		else
-		{
-			PRINTF("\n ***Unable to obtain user log semaphore\n");
-		}
-	}
-	else
-	{
-		PRINTF("\n ***user log semaphore not initialized!\n");
-	}
-
-	return return_value;
-
-}
-/**
- *******************************************************************************
- * @brief Process to update the user log management
- * next write (store) location, making sure it's done with exclusive access
- *
- *  Returns FALSE if unable to gain exclusive access
- *  returns TRUE otherwise
- *******************************************************************************
- */
-static int update_log_store_location(int new_location)
-{
-	int return_value = pdFALSE;
-
-	if(user_log_semaphore != NULL )
-	{
-		/* See if we can obtain the semaphore.  If the semaphore is not
-			available wait 10 ticks to see if it becomes free. */
-		if( xSemaphoreTake( user_log_semaphore, ( TickType_t ) 10 ) == pdTRUE )
-		{
-//			PRINTF("****** update_log_store_location: new value %d ******\n", new_location);
-			/* We were able to obtain the semaphore and can now access the
-				shared resource. */
-			pUserData->next_log_entry_write_position = new_location;
-
-			/* We have finished accessing the shared resource.  Release the
-				semaphore. */
-			xSemaphoreGive( user_log_semaphore );
-			return_value = pdTRUE;
-		}
-		else
-		{
-			PRINTF("\n ***Unable to obtain user log semaphore\n");
-		}
-	}
-	else
-	{
-		PRINTF("\n ***user log semaphore not initialized!\n");
-	}
-
-	return return_value;
-
-}
 
 /**
  *******************************************************************************
@@ -4807,6 +4517,42 @@ static void increment_MQTT_stat(unsigned int *stat)
 
 /*
  * ******************************************************************************
+ * @brief get the MQTT stats in a safe manner
+ *
+ * ******************************************************************************
+ */
+unsigned int get_MQTT_stat(unsigned int *stat)
+{
+	unsigned int out = 0;
+	if(Stats_semaphore != NULL )
+	{
+		/* See if we can obtain the semaphore.  If the semaphore is not
+			available wait 10 ticks to see if it becomes free. */
+		if( xSemaphoreTake( Stats_semaphore, ( TickType_t ) 10 ) == pdTRUE )
+		{
+			/* We were able to obtain the semaphore and can now access the
+				shared resource. */
+			out = (*stat);
+			/* We have finished accessing the shared resource.  Release the
+				semaphore. */
+			xSemaphoreGive( Stats_semaphore );
+		}
+		else
+		{
+			Printf("\n ***print stats: Unable to obtain Stats semaphore\n");
+		}
+	}
+	else
+	{
+		Printf("\n ***print stats: Stats semaphore not initialized!\n");
+	}
+	return out;
+}
+
+
+
+/*
+ * ******************************************************************************
  * @brief check whether data has been transmitted since the last time we checked
  *
  * ******************************************************************************
@@ -4994,10 +4740,8 @@ static int user_process_read_data(void)
 		//PRINTF("FIFO STAT %d: 	%d\r\n", dataptr, fiforeg[0]);
 	}
 
-	// The buffer has been read, now we need to assign a timestamp.
-	// JW: we are just going to log the RTC time counter register
+	// get a timestamp
 	user_time64_msec_since_poweron(&assigned_timestamp);
-
 
 	// Clear the interrupt pending in the accelerometer
 	clear_intstate(&ISR_reason);
@@ -5005,34 +4749,15 @@ static int user_process_read_data(void)
 	// Set the number of data items in the buffer
 	receivedFIFO.num_samples = dataptr;
 	// Set an ever-increasing sequence number
-	pUserData->ACCEL_read_count++;  // Increment FIFO read #
-	receivedFIFO.data_sequence = pUserData->ACCEL_read_count;
+	increment_MQTT_stat(&(pUserData->ACCEL_read_count));  // Increment FIFO read # safely (used in other threads)
+	receivedFIFO.data_sequence = get_MQTT_stat(&(pUserData->ACCEL_read_count));
 	receivedFIFO.accelTime = assigned_timestamp;
 	receivedFIFO.accelTime_prev = pUserData->last_FIFO_read_time_ms;
 
-	// check if we have initalized the previous read.  If not, just estimate it using 14Hz.
-	// this simplifies how timestamps are calculated and won't affect algorithm performance.
-	// 71429 is the number of usec for 14 Hz sampling, so we'll use 71 here.
-	if (pUserData->last_FIFO_read_time_ms == 0){
-		PRINTF ("THIS SHOULD NOT HAPPEN");
-	} // TODO: JW: Confirm this isn't called, then delete
-
-	//TODO: add sanity check to ensure time isn't negative, etc.  Probably should move this
-	// to a function somewhere.
-
 	ms_since_last_read = assigned_timestamp - pUserData->last_FIFO_read_time_ms;
 	pUserData->last_FIFO_read_time_ms = assigned_timestamp;
-	PRINTF(" >>Milliseconds since last AXL read: %u\n",
-			ms_since_last_read);
+	PRINTF(" >>Milliseconds since last AXL read: %u\n",	ms_since_last_read);
 
-
-
-	// Display the values
-//#if defined(__RUNTIME_CALCULATION__) && defined(XIP_CACHE_BOOT)
-//	printf_with_run_time(">>>>>>> FIFO data acquired");
-//#endif
-
-//	PRINTF(" FIFO read sequence %d\n", pUserData->ACCEL_read_count);
 	PRINTF(" FIFO samples read: %d\n", dataptr);
 
 
@@ -5054,7 +4779,8 @@ static int user_process_read_data(void)
 		PRINTF(" Erase sector happened\n");
 	}
 
-	PRINTF(" Total FIFO blocks read since power on   : %d\n", pUserData->ACCEL_read_count);
+	unsigned int temp = get_MQTT_stat(&(pUserData->ACCEL_read_count));
+	PRINTF(" Total FIFO blocks read since power on   : %d\n", temp);
 	if(pUserData->write_fault_count > 0)
 	{
 		PRINTF(" Total FIFO write failures since power on: %d\n", pUserData->write_fault_count);
