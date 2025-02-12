@@ -3,8 +3,7 @@
  *
  * @file neuralert.c
  *
- * @brief Main application code for neuralert
- *
+ * @brief Main application code
  * Copyright (c) 2024, Vanderbilt University
  * 
  * Redistribution and use in source and binary forms, with or without
@@ -44,7 +43,6 @@
 #include "iface_defs.h"
 #include "lwip/sockets.h"
 #include "task.h"
-#include "lwip/sockets.h"
 #include "user_dpm.h"
 #include "user_dpm_api.h"
 #ifdef CFG_USE_RETMEM_WITHOUT_DPM
@@ -54,8 +52,6 @@
 #include "user_nvram_cmd_table.h"
 #include "util_api.h"
 #include "limits.h"
-//#include "spi_flash/spi_flash.h"
-//#include "spi_flash.h"
 #include "W25QXX.h"
 #include "Mc363x.h"
 #include "adc.h"
@@ -64,14 +60,6 @@
 #include "app_common_util.h"
 
 #include "user_version.h"
-#include "buildtime.h"
-
-#ifdef CFG_USE_SYSTEM_CONTROL
-#include <system_start.h>
-#endif
-
-extern void user_start_MQTT_client();
-
 
 /*
  * MACROS AND DEFINITIONS
@@ -80,7 +68,6 @@ extern void user_start_MQTT_client();
 #define SET_BIT(src, bit)				(src |= bit)
 #define CLR_BIT(src, bit)				(src &= (~bit))
 #define BIT_SET(src, bit)				((src & bit) == bit)
-
 
 /* Events */
 #define USER_TERMINATE_TRANSMISSION_EVENT		(1 << 0)
@@ -91,7 +78,6 @@ extern void user_start_MQTT_client();
 #define USER_WIFI_CONNECT_COMPLETE_EVENT		(1 << 5)
 #define USER_MQTT_CONNECT_COMPLETE_EVENT		(1 << 6)
 #define USER_SLEEP_READY_EVENT					(1 << 7)
-
 
 /* Process list */
 #define USER_PROCESS_HANDLE_RTCKEY				(1 << 0)
@@ -117,7 +103,6 @@ extern void user_start_MQTT_client();
 
 
 /* TCP Server Information */
-
 #define TCP_CLIENT_SLP2_PERIOD					((USER_DATA_TX_TIMER_SEC + 60) * 1000000)  // USER_DATA_TX_TIMER_SEC + 1 min
 
 /* NVRAM Items */
@@ -263,7 +248,7 @@ extern void user_start_MQTT_client();
 #define MAX_FIFO_BUFFERS_PER_TRANSMIT_INTERVAL AB_FLASH_MAX_PAGES
 
 // Trigger value for the accelerometer to start MQTT transmission
-//  64 ~= 2 minutes
+//  16 ~= 1 minutes
 // 144 ~= 5 minutes
 // 176 ~= 6 minutes
 // 208 ~= 7 minutes
@@ -277,12 +262,7 @@ extern void user_start_MQTT_client();
 // operate in before the next erase sector time
 #define MQTT_TRANSMIT_TRIGGER_FIFO_BUFFERS_FAST 16 // 1 minute (assuming 7 Hz AXL sampling rate)
 #define MQTT_TRANSMIT_TRIGGER_FIFO_BUFFERS_SLOW 80 // 5 minutes (assuming 7 Hz AXL sampling rate)
-//#define MQTT_TRANSMIT_TRIGGER_FIFO_BUFFERS 64
-// 144 = 9 x 16 and just about 5 minutes at 29 samples / FIFO
-//#define MQTT_TRANSMIT_TRIGGER_FIFO_BUFFERS 144 // Use this for production
-//#define MQTT_TRANSMIT_TRIGGER_FIFO_BUFFERS 176
-//#define MQTT_TRANSMIT_TRIGGER_FIFO_BUFFERS 208
-//#define MQTT_TRANSMIT_TRIGGER_FIFO_BUFFERS 272
+
 
 // This value if for the first transmission, which we want to occur relatively quickly after bootup.
 // each FIFO trigger is about 4 seconds, so if the following is set to 3, it will start the transmit
@@ -332,21 +312,7 @@ extern void user_start_MQTT_client();
 // publish.
 #define MQTT_SUB_TIMEOUT_SECONDS 5
 
-
-
-//#define SPI_FLASH_TXDATA_SIZE 256
-//#define SPI_FLASH_RXDATA_SIZE 256
-//#define SPI_FLASH_INPUT_DATA_SIZE 64
-//#define SPI_FLASH_TEST_COUNT 3
-//#define SPI_SFLASH_ADDRESS 0x1000
-
 #define	TEST_DBG_DUMP(tag, buf, siz)	thread_peripheral_dump( # buf , buf , siz)
-
-
-//void spi_flash_config_pin() {
-//	_da16x_io_pinmux(PIN_DMUX, DMUX_SPIm);
-//	_da16x_io_pinmux(PIN_EMUX, EMUX_SPIm);
-//}
 
 
 #ifdef CFG_USE_RETMEM_WITHOUT_DPM
@@ -360,7 +326,7 @@ extern void user_start_MQTT_client();
 // calculate the average period per sample.
 // This is then used by the MQTT task to calculate the timestamp
 // value for each sample transmitted.
-// This number should be less than the MQTT transmit trigger to insure
+// This number should be less than the MQTT transmit trigger to ensure
 // that we've established the calibration information prior to
 // starting MQTT transmission
 #define AXL_CALIBRATION_CYCLES 30
@@ -383,19 +349,15 @@ typedef struct
  *
  * Note entire area is set to zero at boot time when it is allocated
  *******************************************************************/
-typedef struct _userData {
-
+typedef struct userData {
 
 	// *****************************************************
 	// System state information (used to manage LEDs)
 	// *****************************************************
 	UINT32 system_state_map;		// bitmap for different system states
-//	UINT32 system_alert_map;		// bitmap for different alerts: JW: this is deprecated 10.4
 
 	UINT32 ServerShutdownRequested;	// Set to a magic value when a terminate downlink is received
 
-
-	//JW: AXL calibration is deprecated -- no longer needed, we interpolate between two buffer read times
 
 
 	// *****************************************************
@@ -478,23 +440,10 @@ typedef struct _userData {
 	// *****************************************************
 	// Accelerometer buffer management
 	// *****************************************************
-	int16_t AB_initialized_flag;			// 0 if not initialized; 1 otherwise
 	int8_t MQTT_internal_error;			// A genuine programming error, not transmit
 	AB_INDEX_TYPE next_AB_write_position; //TODO: repurpose the use of this variable for LIFO (not FIFO)
-	AB_INDEX_TYPE next_AB_transmit_position; //TODO: deprecate this variable, instead we'll reference it from the head and what hasn't been transmitted
 	_AB_transmit_map_t AB_transmit_map[AB_TRANSMIT_MAP_SIZE]; //
 
-
-
-	// *****************************************************
-	// User logging buffer management
-	// *****************************************************
-	int16_t user_holding_log_initialized;
-	int16_t user_log_initialized_flag;	// 0 if not initialized; 1 otherwise
-	AB_INDEX_TYPE next_log_holding_position;
-	AB_INDEX_TYPE oldest_log_holding_position;
-	AB_INDEX_TYPE next_log_entry_write_position;
-	AB_INDEX_TYPE oldest_log_entry_position;
 
 
 
@@ -543,7 +492,7 @@ static TaskHandle_t user_watchdog_task_handle = NULL; // task handle of the user
 static UINT8 isSysNormalBoot = pdFALSE;			// pdTRUE when power-on boot (first time boot)
 // note that the following versions of these are turned on and off so that
 // the accelerometer knows why it's reading and can assign an appropriate timestamp
-static UINT8 isPowerOnBoot = pdFALSE;			// pdTRUE when poewr-on boot (first time boot)
+static UINT8 isPowerOnBoot = pdFALSE;			// pdTRUE when power-on boot (first time boot)
 static UINT8 isAccelerometerWakeup = pdFALSE;	// pdTRUE when wakened from sleep by accelerometer interrupt
 static UINT8 isAccelerometerInterrupt = pdFALSE;// pdTRUE when interrupt while awake
 static UINT8 isAccelerometerTimeout = pdFALSE;	// pdTRUE when missed interrupt detected
@@ -568,21 +517,17 @@ SemaphoreHandle_t Flash_semaphore = NULL;
  * This is used so we don't accidentally execute simultaneous read/writes
  */
 SemaphoreHandle_t Stats_semaphore = NULL;
-
+/*
+ * Semaphore to coordinate between processLists between threads.
+ */
+SemaphoreHandle_t Process_semaphore = NULL;
 
 /*
  * Temporary storage for accelerometer samples to be transmitted
  * Created at transmit time from the stored FIFO structures
  */
-// static int num_xmit_samples = 0;
 static accelDataStruct accelXmitData[MAX_SAMPLES_PER_PACKET];
 
-/*
- * Temporary storage to hold all the FIFO blocks to be transmitted
- * during one MQTT transmit cycle.
- * This is the workaround that allows the AXL task to set up data
- * for MQTT so that MQTT doesn't have to read from the SPI Flash
- */
 
 /*
  * Area in which to compose JSON packet
@@ -609,29 +554,12 @@ static UserDataBuffer *pUserData = NULL;
 
 
 
-#ifdef __TIME64__
-//	__time64_t last_sleep_msec;
-//	__time64_t last_sleep_sec;
-#else
-	time_t now;
-#endif /* __TIME64__ */
-
-/*
- * Time measurement for our processes
- * (under construction)
- */
-//static struct tm last_sleep_time;
-//static struct tm last_transmit_time;
-// *localtime (const time_t *_timer);
-
-
-
 
 /*
  * STATIC FUNCTIONS DEFINITIONS (forward declarations)
  *******************************************************************************
  */
-//static void user_process_timer_event(void); // JW: TO BE REMOVED -- DEPRECATED
+void user_start_MQTT_client();
 UINT8 system_state_bootup(void);
 static int user_process_connect_ap(void);
 //static int check_connection_status(void);
@@ -643,22 +571,17 @@ static UCHAR user_process_check_wifi_conn(void);
 static int check_AB_transmit_location(int, int);
 static int clear_AB_transmit_location(int, int);
 static int get_AB_write_location(void);
-static int get_AB_transmit_location(void);
-//static int update_AB_transmit_location(int new_location);
 static int update_AB_write_location(void);
 static int AB_read_block(HANDLE SPI, UINT32 blockaddress, accelBufferStruct *FIFOdata);
-static int flash_write_block(HANDLE SPI, int blockaddress, UCHAR *pagedata, int num_bytes);
-static int get_holding_log_next_write_location(void);
-static int get_holding_log_oldest_location(void);
-static int update_holding_log_oldest_location(int new_location);
-static int user_write_log_to_flash(USERLOG_ENTRY *pLogData, int *did_an_erase);
-static int get_log_oldest_location(void);
-static int get_log_store_location(void);
-static void log_current_time(UCHAR *PrefixString);
 static void clear_MQTT_stat(unsigned int *stat);
 unsigned int get_MQTT_stat(unsigned int *stat);
 static void increment_MQTT_stat(unsigned int *stat);
 static void timesync_snapshot(void);
+static void clr_process_bit(UINT32);
+static void set_process_bit(UINT32);
+static unsigned int process_bit_set(UINT32);
+static void user_reboot(void);
+
 
 // Macros for converting from RTC clock ticks (msec * 32768) to microseconds
 // and milliseconds
@@ -669,8 +592,8 @@ static void timesync_snapshot(void);
  * EXTERN FUNCTIONS DEFINITIONS
  *******************************************************************************
  */
+
 extern void system_control_wlan_enable(uint8_t onoff);
-extern void wifi_cs_rf_cntrl(int flag);
 extern int fc80211_set_app_keepalivetime(unsigned char tid, unsigned int sec,
 										void (*callback_func)(unsigned int tid));
 void da16x_time64_sec(__time64_t *p, __time64_t *cur_sec);
@@ -727,7 +650,7 @@ ULONG user_MQTT_task_time_msec;   // run time msec
 
 // LED timer and control functions
 extern void start_LED_timer();
-extern void setLEDState(uint8_t number1, uint8_t state1, uint16_t count1, uint8_t number2,  uint8_t state2, uint16_t count2, uint16_t secondsTotal);
+
 
 /**
  *******************************************************************************
@@ -843,7 +766,7 @@ static void notify_user_LED()
 #endif//JW: deprecated 10.14
 
 
-	if (BIT_SET(processLists, USER_PROCESS_BOOTUP))
+	if (process_bit_set(USER_PROCESS_BOOTUP) == 1)
 	{
 		setLEDState(YELLOW, LED_SLOW, 200, 0, LED_OFFX, 0, 200); // constant yellow
 	}
@@ -867,13 +790,11 @@ static void notify_user_LED()
 UINT8 check_mqtt_block()
 {
 	// check if the system state is clear
-	if (BIT_SET(processLists, USER_PROCESS_BLOCK_MQTT)) {
+	if (process_bit_set(USER_PROCESS_BLOCK_MQTT)) {
 		return pdTRUE;
 	}
 	return pdFALSE;
 }
-
-
 
 
 
@@ -937,7 +858,7 @@ void user_mqtt_pub_cb(int mid)
 {
     pUserData->MQTT_last_message_id = mid; // store the last message id
 
-    PRINTF ("MQTT PUB CALBACK, clearing inflight!\n");
+    PRINTF("\n Neuralert: [%s] MQTT PUB callback, clearing inflight", __func__);
 
     // See user_mqtt_client_send_message_with_qos for what we're doing here.
     pUserData->MQTT_inflight = 0; // clear the inflight variable
@@ -946,7 +867,7 @@ void user_mqtt_pub_cb(int mid)
 
 void user_mqtt_conn_cb(void)
 {
-	PRINTF("\n\nMQTT CONNECTED!!!!!!!!!!!!!!!!!\n\n");
+	PRINTF("\nNeuralert: [%s] MQTT CONNECTED",__func__);
 	// Now that the mqtt connection is established, we can create our MQTT transmission task
 	//vTaskDelay(10);
 	user_create_MQTT_task();
@@ -1076,19 +997,6 @@ static void user_sleep_ready_event(void)
 }
 
 
-/**
- *******************************************************************************
- * @brief Send attempt transmit event to the user task
- *******************************************************************************
- */
-static void user_attempt_transmit_event(void)
-{
-	if (xTask) {
-		xTaskNotifyIndexed(xTask, 0, USER_ATTEMPT_TRANSMIT_EVENT, eSetBits);
-	}
-}
-
-
 
 /**
  *******************************************************************************
@@ -1141,65 +1049,19 @@ static float get_battery_voltage()
 
 	// Read battery voltage
 	// Note that due to a voltage divider, this measurement
-	// isn't the actual voltage.  The divider ratio is,
-	// according to Nicholas Joseph, 54/25.
+	// isn't the actual voltage.  The divider ratio is, according to Nicholas Joseph, 54/25.
+	// JW has confirmed this is probably correct, 140 * 54 / 25 = 302 (3.02 Volts) which seems about right.
+ 	//
 	DRV_ADC_READ(hadc, DA16200_ADC_CH_0, (UINT32 *)&data, 0);
 	adcData = (data >> 4) & 0xFFF;
-	adcDataFloat = (adcData * VREF)/4095.0;
+	adcDataFloat = ((float)adcData * VREF)/4095.0;
 
-//	    PRINTF("Current ADC Value = 0x%x 0x%04X %d\r\n",data&0xffff,adcData, (uint16_t)(adcDataFloat * 100));
 
 	// turn off battery measurement circuit
 	write_data = 0;
 	GPIO_WRITE(gpioa, GPIO_PIN10, &write_data, sizeof(uint16_t));   /* disable battery input */
 
 	return adcDataFloat;
-}
-
-/**
- *******************************************************************************
- * @brief wait for MQTT connection with timeout in ms
- * return: 0 ; no error
- *******************************************************************************
- */
-static int user_process_MQTT_wait_for_connection(int max_ms)
-{
-	Printf("\nWaiting for MQTT\n");
-	int return_status = -1;
-	int delay_time = 0;
-	int delay_interval = 1000;	// ms to delay between checks
-#if defined(__RUNTIME_CALCULATION__) && defined(XIP_CACHE_BOOT)
-	printf_with_run_time("===user_process_MQTT_wait_for_connection start");
-#endif
-	while (1)
-	{
-		// delay until mqtt is connected
-		if (!mqtt_client_check_conn())
-		{
-			PRINTF("\r\n [%s] No MQTT Session ...\r\n", __func__);
-#if defined(__RUNTIME_CALCULATION__) && defined(XIP_CACHE_BOOT)
-	printf_with_run_time("===user_process_MQTT_wait_for_connection waiting");
-#endif
-
-			// wait delay_interval ms
-			vTaskDelay(pdMS_TO_TICKS(delay_interval));
-			delay_time += delay_interval;
-			if(delay_time > max_ms)
-				break;
-		}
-		else
-		{
-			return_status = 0;
-			break;
-		}
-	}
-
-#if defined(__RUNTIME_CALCULATION__) && defined(XIP_CACHE_BOOT)
-	printf_with_run_time("===user_process_MQTT_wait_for_connection done");
-#endif
-
-	return return_status;
-
 }
 
 /**
@@ -1219,70 +1081,34 @@ static int user_process_MQTT_wait_for_connection(int max_ms)
  *******************************************************************************
  */
 
-int send_json_packet (int startAdd, packetDataStruct pData, int msg_number, int sequence)
+int send_json_packet(int startAdd, packetDataStruct pData, int msg_number, int sequence)
 {
 
 	int count = pData.num_samples;
 
 	int return_status = 0;
-	int transmit_status = 0;
 	int packet_len;
-	static int mqttCount = 0;
-	int status=0, statusCheck, i;
-	unsigned char str[50],str2[20];		// temp working strings for assembling
-	unsigned char rawdata[8];
+	int statusCheck, i;
+	unsigned char str[50], str2[20];		// temp working strings for assembling
 	int16_t Xvalue;
 	int16_t Yvalue;
 	int16_t Zvalue;
-//	int type;
-	long timezone;
+
 #ifdef __TIME64__
 	__time64_t now;
-	__time64_t nowSec;
 #else
 	time_t now;
 #endif /* __TIME64__ */
-	struct tm *ts;
+	struct tm;
 	char buf[80], nowStr[20];
-	uint32_t data;
-	/*
-	 * Battery voltage
-	 */
-	uint16_t adcData;
 	float adcDataFloat;
 	unsigned char fault_count;
 
-	uint16_t write_data;
 
 
 	/* WLAN0 */
 #ifndef SILENT
 	PRINTF("WLAN0 - %s\n", macstr);
-#endif
-
-#ifdef __TIME64__
-	da16x_time64_msec(NULL, &now);
-	da16x_time64_sec(NULL, &nowSec);
-	uint64_t num1 = ((now/1000000) * 1000000);
-	uint64_t num2 = now - num1;
-	uint32_t num3 = num2;
-//	PRINTF("now %lld - %lld %lld %ld\r\n",now/1000000,num1, num2, num3);
-	sprintf(nowStr,"%ld",now/1000000);
-//	PRINTF("%s\r\n",nowStr);
-	sprintf(str2,"%06ld",num3);
-//	PRINTF("%s\r\n",str2);
-	strcat(nowStr,str2);
-//	PRINTF("nows; %s\r\n",nowStr);
-//	PRINTF("now %lld %lu %lu\r\n",now, (uint32_t)(now >> 32), (uint32_t)(now & 0xFFFFFFFF));
-//	PRINTF("now %llX %08lX %08lX\r\n",now, (uint32_t)(now >> 32), (uint32_t)(now & 0xFFFFFFFF));
-		ts = (struct tm *)da16x_localtime64(&nowSec);
-#else
-		now = da16x_time32(NULL);
-		ts = da16x_localtime32(&now);
-#endif /* __TIME64__ */
-		da16x_strftime(buf, sizeof (buf), "%Y.%m.%d %H:%M:%S", ts);
-#ifndef SILENT
-//		PRINTF("- Current Time : %s (GMT %+02d:%02d)\n",   buf,   da16x_Tzoff() / 3600,   da16x_Tzoff() % 3600);
 #endif
 
 	/*
@@ -1303,7 +1129,7 @@ int send_json_packet (int startAdd, packetDataStruct pData, int msg_number, int 
 	 * MAC address of device - stored in retention memory
 	 * during the bootup event
 	 */
-	sprintf(str,"\t\t\t\"id\": \"%s\",\r\n",pUserData->Device_ID);
+	sprintf(str,"\t\t\t\"id\": \"%s\",\r\n", pUserData->Device_ID);
 	strcat(mqttMessage,str);
 
 
@@ -1315,24 +1141,24 @@ int send_json_packet (int startAdd, packetDataStruct pData, int msg_number, int 
 	 *	"bat": 140,
 	 *	"accX": [6 6 6 6 6 6 6 6 6 6 6 6 5 6 6 6 6 6 6 6 5 6 6 6 6 6 6 6 6 6 6 6 6 6 6 6 5 6 6 6 6 6 6 6 6 6 6 6 6 6 6 6 6
 	 *
-	 *	This change will add the following field between the “seq” field and the “bat” field:
-	 *
 	 *	"timesync": "2023.01.17 12:53:55 (GMT 00:00) 0656741",
 	 *
-	 *	where the data consists of the current date and time in “local” time, as configured when WIFI is set up.  The last field (0656741) is an internal timestamp in milliseconds since power-on that corresponds to the current local time.  This will make it possible to align timestamps from different devices.
+	 *	where the data consists of the current date and time in “local” time, as configured when WIFI is set up.
+	 *	The last field (0656741) is an internal timestamp in milliseconds since power-on that corresponds to the
+	 *	current local time.  This will make it possible to align timestamps from different devices.
 	 *
-	 *	Note that the “current” local date and time is that returned from an SNTP server on the Internet and is subject to internet lag and internal processing times.
+	 *	Note that the “current” local date and time is that returned from an SNTP server on the Internet
+	 *	and is subject to internet lag and internal processing times.  None of which matter practically speaking.
 	 *
 	 */
 	time64_string(buf, &pUserData->MQTT_timesync_timestamptime_msec);
-	sprintf(str,"\t\t\t\"timesync\": \"%s %s\",\r\n",
-			pUserData->MQTT_timesync_current_time_str, buf);
+	sprintf(str,"\t\t\t\"timesync\": \"%s %s\",\r\n", pUserData->MQTT_timesync_current_time_str, buf);
 	strcat(mqttMessage,str);
 
 	/* get battery value */
 	adcDataFloat = get_battery_voltage();
 	//	    PRINTF("Current ADC Value: %d\n",(uint16_t)(adcDataFloat * 100));
-	// Battery voltage in centivolts
+
 	sprintf(str,"\t\t\t\"bat\": %d,\r\n",(uint16_t)(adcDataFloat * 100));
 	strcat(mqttMessage,str);
 
@@ -1391,12 +1217,6 @@ int send_json_packet (int startAdd, packetDataStruct pData, int msg_number, int 
 	strcat(mqttMessage,"\t\t\t},\r\n");
 
 
-
-//	PRINTF(">> JSON preamble: %s\n", mqttMessage); // FRSDEBUG
-
-//		packet_len = strlen(mqttMessage);
-//		PRINTF("\n**Neuralert: send_json_packet: %d length before accel values\n", packet_len); // FRSDEBUG
-
 	/*
 	 *  Accelerometer X values
 	 */
@@ -1410,9 +1230,6 @@ int send_json_packet (int startAdd, packetDataStruct pData, int msg_number, int 
 	}
 	sprintf(str,"],\r\n");
 	strcat(mqttMessage,str);
-
-	packet_len = strlen(mqttMessage);
-//		PRINTF("\n**Neuralert: send_json_packet: %d length with X accel values\n", packet_len); // FRSDEBUG
 
 	/*
 	 *  Accelerometer Y values
@@ -1428,9 +1245,6 @@ int send_json_packet (int startAdd, packetDataStruct pData, int msg_number, int 
 	sprintf(str,"],\r\n");
 	strcat(mqttMessage,str);
 
-	packet_len = strlen(mqttMessage);
-//		PRINTF("\n**Neuralert: send_json_packet: %d length with X&Y accel values\n", packet_len); // FRSDEBUG
-
 	/*
 	 *  Accelerometer Z values
 	 */
@@ -1444,9 +1258,6 @@ int send_json_packet (int startAdd, packetDataStruct pData, int msg_number, int 
 	}
 	sprintf(str,"],\r\n");
 	strcat(mqttMessage,str);
-
-	packet_len = strlen(mqttMessage);
-//		PRINTF("\n**Neuralert: send_json_packet: %d length with X&Y&Z accel values\n", packet_len); // FRSDEBUG
 
 	/*
 	 *  Timestamps
@@ -1468,8 +1279,7 @@ int send_json_packet (int startAdd, packetDataStruct pData, int msg_number, int 
 		uint64_t num1 = ((now/1000000) * 1000000);
 		uint64_t num2 = now - num1;
 		uint32_t num3 = num2;
-		sprintf(nowStr,"%03ld",now/1000000); //JW: I changed this so all times are formatted the same (9 digits)
-		//sprintf(nowStr,"%ld",now/1000000);
+		sprintf(nowStr,"%03ld",(long)(now/1000000));
 		sprintf(str2,"%06ld ",num3);
 		strcat(nowStr,str2);
 		strcat(mqttMessage,nowStr);
@@ -1477,36 +1287,25 @@ int send_json_packet (int startAdd, packetDataStruct pData, int msg_number, int 
 	sprintf(str,"]\r\n");
 	strcat(mqttMessage,str);
 
-	packet_len = strlen(mqttMessage);
-//		PRINTF("\n**Neuralert: send_json_packet: %d length with all accel values\n", packet_len); // FRSDEBUG
-
 	/*
 	 * Closing braces
 	 */
 	strcat(mqttMessage,"\r\n\t\t}\r\n\t}\r\n}\r\n");
 
 	packet_len = strlen(mqttMessage);
-	PRINTF(">>send_json_packet: %d total message length\n", packet_len); // FRSDEBUG
+	PRINTF("\nNeuralert: [%s]: %d total message length\n", __func__, packet_len); // FRSDEBUG
 	// Sanity check in case some future person expands message
 	// without increasing buffer size
 	if (packet_len > MAX_JSON_STRING_SIZE)
 	{
 		PRINTF("\nNeuralert: [%s] JSON packet size too big: %d with limit %d", __func__, packet_len, (int)MAX_JSON_STRING_SIZE);
+		//TODO: force a reboot if this happens.
 	}
 
-	// Transmit with publish topic from NVRAM
-//		transmit_status = mqtt_client_send_message(NULL, mqttMessage);
 
-//		unsigned long timeout_qos = 0;
-//		timeout_qos = (unsigned long) (pdMS_TO_TICKS(MQTT_QOS_TIMEOUT_MS) / 10);
-//		PRINTF("\n>>timeout qos: %lu \n", timeout_qos);
-//		transmit_status = 	mqtt_client_send_message_with_qos(NULL, mqttMessage, timeout_qos);
+	return_status = user_mqtt_send_message();
 
-	//transmit_status = 	mqtt_client_send_message_with_qos(NULL, mqttMessage, 100);
-
-	transmit_status = user_mqtt_send_message();
-
-	if(transmit_status == 0)
+	if(return_status == 0)
 	{
 		PRINTF("\n Neuralert: [%s], transmit %d:%d successful", __func__, msg_number, sequence);
 	}
@@ -1514,11 +1313,6 @@ int send_json_packet (int startAdd, packetDataStruct pData, int msg_number, int 
 	{
 		PRINTF("\n Neuralert: [%s] transmit %d:%d unsuccessful", __func__, msg_number, sequence);
 	}
-
-	return_status = transmit_status;
-
-	// delay to allow message to be transmitted by the MQTT client task
-	//vTaskDelay(pdMS_TO_TICKS(500)); //JW: this should be deleted now the race condition is fixed
 
 	return return_status;
 }
@@ -1547,7 +1341,6 @@ void time64_string (UCHAR *timestamp_str, __time64_t *timestamp)
 	strcat(nowStr,str2);
 	strcpy(timestamp_str,nowStr);
 
-	return;
 }
 
 /**
@@ -1591,13 +1384,12 @@ void time64_msec_string (UCHAR *time_str, __time64_t *time_msec)
  *        time in seconds, because printf doesn't handle long longs
  *******************************************************************************
  */
-void time64_seconds_string (UCHAR *time_str, __time64_t *time_msec)
+void time64_seconds_string(UCHAR *time_str, __time64_t *time_msec)
 {
 
 	ULONG time_milliseconds;
 	ULONG time_tenths;
 	ULONG time_seconds;
-	UCHAR temp_string[40];
 
 	time_seconds = (ULONG)(*time_msec / (__time64_t)1000);
 	time_milliseconds = (ULONG)(*time_msec
@@ -1637,22 +1429,16 @@ void time64_seconds_string (UCHAR *time_str, __time64_t *time_msec)
  *
  *******************************************************************************
  */
-void calculate_timestamp_for_sample(__time64_t *FIFO_ts, __time64_t *FIFO_ts_prev, int offset, int FIFO_samples, __time64_t *adjusted_timestamp)
+void calculate_timestamp_for_sample(__time64_t *FIFO_ts, __time64_t *FIFO_ts_prev, int offset,
+	int FIFO_samples, __time64_t *adjusted_timestamp)
 {
-	__time64_t scaled_timestamp;	// times 1000 for more precise math
+	//__time64_t scaled_timestamp;	// times 1000 for more precise math
 	__time64_t scaled_timestamp_prev; // times 1000 for more precise math
 	__time64_t scaled_offsettime;	// the time offset of this sample * 1000
 	__time64_t adjusted_scaled_timestamp;
 	__time64_t rounded_offsettime;
-	__time64_t inter_sample_period_usec;	// Amount we adjust for each sample in the block
 
-	char input_str[20];
-	char output_str[20];
-	char scaled_time_str[20];
-	char scaled_offset_str[20];
-	char offset_str[20];
-
-	scaled_timestamp = *FIFO_ts;
+	__time64_t scaled_timestamp = *FIFO_ts;
 	scaled_timestamp = scaled_timestamp * (__time64_t)1000;
 
 	scaled_timestamp_prev = *FIFO_ts_prev;
@@ -1667,7 +1453,6 @@ void calculate_timestamp_for_sample(__time64_t *FIFO_ts, __time64_t *FIFO_ts_pre
 			                  / (__time64_t)1000;
 
 	*adjusted_timestamp = rounded_offsettime;
-	return;
 }
 
 
@@ -1712,32 +1497,18 @@ static int get_AB_buffer_gap(int loc)
  */
 static packetDataStruct assemble_packet_data (int start_block)
 {
-	int blocknumber;		// 0-based block index in Flash
-	int check_bit_flag;
-	int transmit_flag;
-	unsigned int buffer_gap;
-	ULONG blockaddr;			// physical address in flash
+	// 0-based block index in Flash
+	// physical address in flash
 	int done = pdFALSE;
 	__time64_t block_timestamp;
 	__time64_t block_timestamp_prev;
 	__time64_t sample_timestamp;
-	ULONG sample_timestamp_offset;
-	int block_samples;
-	//int timesource;
-	int timeoffset;
 	accelBufferStruct FIFOblock;
 
-	int i;
 	int retry_count;
-	int timeoffsetindex;   	// +- position from where timestamp is assigned
-	__time64_t inter_sample_period_usec;	// Amount we adjust for each sample in the block
 
 	packetDataStruct packet_data;
 
-	char scaled_time_str[20];
-
-	char block_timestamp_str[20];
-	char sample_timestamp_str[20];
 	HANDLE SPI = NULL;
 
 	// Initialize output
@@ -1759,18 +1530,19 @@ static packetDataStruct assemble_packet_data (int start_block)
 		PRINTF("\n Neuralert: [%s] MAJOR SPI ERROR: Unable to open SPI bus handle", __func__);
 		packet_data.flash_error = FLASH_OPEN_ERROR;
 		return packet_data;
+		//todo: Major error, reboot system.
 	}
 
 	// Note that start_block may be less than or greater than end_block
 	// depending on whether we wrap around or not
 	// If we're only sending one block, then start_block will be
 	// equal to end_block
-	blocknumber = start_block;
-	check_bit_flag = 1; // always start with the check_bit_flag set to 1
+	int blocknumber = start_block;
+	int check_bit_flag = 1; // always start with the check_bit_flag set to 1
 	while (!done)
 	{
 		// Check if the next write is too close for comfort
-		buffer_gap = (unsigned int) get_AB_buffer_gap(blocknumber);
+		unsigned int buffer_gap = (unsigned int) get_AB_buffer_gap(blocknumber);
 		if (buffer_gap <= AB_TRANSMIT_SAFETY_GAP){
 			packet_data.done_flag = pdTRUE;
 			done = pdTRUE;
@@ -1800,7 +1572,7 @@ static packetDataStruct assemble_packet_data (int start_block)
 		}
 		else // check_bit_flag == 1
 		{
-			transmit_flag = check_AB_transmit_location(blocknumber, pdTRUE);
+			int transmit_flag = check_AB_transmit_location(blocknumber, pdTRUE);
 			if (transmit_flag == -1)
 			{
 				// there was an error in reading the transmit map
@@ -1813,8 +1585,8 @@ static packetDataStruct assemble_packet_data (int start_block)
 				// based on the block timestamp and the samples relation to
 				// when that timestamp was taken
 				// Calculate address of next sector to write
-				blockaddr = (ULONG)AB_FLASH_BEGIN_ADDRESS +
-						((ULONG)AB_FLASH_PAGE_SIZE * (ULONG)blocknumber);
+				ULONG blockaddr = (ULONG) AB_FLASH_BEGIN_ADDRESS +
+				                  ((ULONG) AB_FLASH_PAGE_SIZE * (ULONG) blocknumber);
 				for (retry_count = 0; retry_count < 3; retry_count++)
 				{
 					if (!AB_read_block(SPI, blockaddr, &FIFOblock))
@@ -1837,13 +1609,15 @@ static packetDataStruct assemble_packet_data (int start_block)
 				// Only process FIFOblock if the data is real -- otherwise, skip block and proceed.
 				if (FIFOblock.num_samples > 0)
 				{
+					char block_timestamp_str[20];
 					// add the samples to the transmit array
 					packet_data.num_blocks++;
 					block_timestamp = FIFOblock.accelTime;
 					block_timestamp_prev = FIFOblock.accelTime_prev;
+					int block_samples;
 					block_samples = FIFOblock.num_samples;
 					time64_string (block_timestamp_str, &block_timestamp);
-					for (i=0; i<FIFOblock.num_samples; i++)
+					for (int i = 0; i<FIFOblock.num_samples; i++)
 					{
 						accelXmitData[packet_data.num_samples].Xvalue = FIFOblock.Xvalue[i];
 						accelXmitData[packet_data.num_samples].Yvalue = FIFOblock.Yvalue[i];
@@ -1886,86 +1660,6 @@ static packetDataStruct assemble_packet_data (int start_block)
 	return packet_data;
 }
 
-
-
-/**
- *******************************************************************************
- * @brief Process to connect to an AP that stored in NVRAM.
- * return: 0 ; no error
- *******************************************************************************
- */
-static int user_process_connect_to_ap_and_wait(int max_wait_seconds)
-{
-	int	ret = 0;
-	char value_str[128] = {0, };
-	unsigned int start_time_ticks, cur_time_ticks, elapsed_time_ticks;
-	unsigned int max_wait_msec;
-	unsigned int max_wait_TICKS;
-	unsigned int elapsed_time_msec;
-#define INITIAL_CHECK_INTERVAL_MSEC 3000
-#define CHECK_INTERVAL_MSEC 1000
-	int connected;
-
-
-
-	PRINTF("**Neuralert: %s\n", __func__); // FRSDEBUG
-#if defined(__RUNTIME_CALCULATION__) && defined(XIP_CACHE_BOOT)
-	printf_with_run_time("===Enter connect_to_ap_and_wait");
-#endif
-
-	if (user_process_check_wifi_conn() == pdTRUE) {
-		PRINTF("**Neuralert: user_process_connect_to_ap() already connected\n"); // FRSDEBUG
-
-		/* Connection is already established */
-//		user_wifi_connection_complete_event();
-		return ret;
-	}
-
-	// use the internal command line interface to initiate the connect
-	PRINTF("**Neuralert: user_process_connect_to_ap() attempting connection\n"); // FRSDEBUG
-#if defined(__RUNTIME_CALCULATION__) && defined(XIP_CACHE_BOOT)
-	printf_with_run_time("===start of connection attempt");
-#endif
-
-	ret = da16x_cli_reply("select_network 0", NULL, value_str);
-	if (ret < 0 || strcmp(value_str, "FAIL") == 0) {
-		PRINTF(" [%s] Failed connect to AP (da16x_cli_reply) 0x%x %s\n", __func__, ret, value_str);
-
-		ret = -1;
-		return ret;
-	}
-
-	// Wait an initial time since we know it will take a little time
-	PRINTF(" [%s] Start initial check delay %d\n", __func__, INITIAL_CHECK_INTERVAL_MSEC);
-	vTaskDelay(pdMS_TO_TICKS(INITIAL_CHECK_INTERVAL_MSEC));
-
-	// Wait for connection with timeout
-	start_time_ticks = xTaskGetTickCount();
-	max_wait_msec = max_wait_seconds * 1000;
-	max_wait_TICKS = pdMS_TO_TICKS(max_wait_msec);
-	do {
-		vTaskDelay(pdMS_TO_TICKS(CHECK_INTERVAL_MSEC));
-
-		PRINTF(" [%s] Checking WIFI\n", __func__);
-
-		cur_time_ticks = xTaskGetTickCount();
-		if (cur_time_ticks >= start_time_ticks) {
-			elapsed_time_ticks = cur_time_ticks - start_time_ticks;
-		} else {
-			elapsed_time_ticks =  (((unsigned int) 0xFFFFFFFF) - start_time_ticks) + cur_time_ticks;
-		}
-		PRINTF(" [%s] elapsed time %d ticks (max %d ticks )\n", __func__, elapsed_time_ticks, max_wait_TICKS);
-
-		connected = user_process_check_wifi_conn();
-
-	} while (!connected && (elapsed_time_ticks <= max_wait_TICKS));
-
-	if (connected)
-		ret = 0;
-	else
-		ret = -1;
-	return ret;
-}
 
 /**
  *******************************************************************************
@@ -2102,24 +1796,20 @@ static void user_mqtt_msg_cb (const char *buf, int len, const char *topic)
 void user_terminate_transmit(void)
 {
 
-#if defined(__RUNTIME_CALCULATION__) && defined(XIP_CACHE_BOOT)
-	printf_with_run_time("\n===user_terminate_transmit called"); // This might be causing a fault
-#endif
-
-	int sys_wdog_id = -1;
+	int sys_wdog_id;
 	sys_wdog_id = da16x_sys_watchdog_register(pdFALSE);
 
 	// Setup a new task to stop the MQTT client -- it can hang and block the wifi disconnect below
-	SET_BIT(processLists, USER_PROCESS_MQTT_STOP);
+	set_process_bit(USER_PROCESS_MQTT_STOP);
 	user_create_MQTT_stop_task();
 	int timeout = MQTT_STOP_TIMEOUT_SECONDS * 10;
-	while (BIT_SET(processLists, USER_PROCESS_MQTT_STOP) && timeout > 0)
+	while (process_bit_set(USER_PROCESS_MQTT_STOP) && timeout > 0)
 	{
 		vTaskDelay(pdMS_TO_TICKS(100)); // 100 ms delay
 		timeout--;
 		da16x_sys_watchdog_notify(sys_wdog_id);
 	}
-	CLR_BIT(processLists, USER_PROCESS_MQTT_STOP);
+	clr_process_bit(USER_PROCESS_MQTT_STOP);
 	da16x_sys_watchdog_notify(sys_wdog_id);
 
 
@@ -2160,10 +1850,10 @@ void user_terminate_transmit(void)
 	wifi_cs_rf_cntrl(TRUE); // Might need to do this elsewhere
 
 	// Clear the transmit process bit so the system can go to sleep
-	CLR_BIT(processLists, USER_PROCESS_MQTT_TRANSMIT);
-	CLR_BIT(processLists, USER_PROCESS_MQTT_STOP);
-	CLR_BIT(processLists, USER_PROCESS_WATCHDOG);
-	CLR_BIT(processLists, USER_PROCESS_WATCHDOG_STOP);
+	clr_process_bit(USER_PROCESS_MQTT_TRANSMIT);
+	clr_process_bit(USER_PROCESS_MQTT_STOP);
+	clr_process_bit(USER_PROCESS_WATCHDOG);
+	clr_process_bit(USER_PROCESS_WATCHDOG_STOP);
 
 	da16x_sys_watchdog_unregister(sys_wdog_id);
 }
@@ -2198,47 +1888,6 @@ static UCHAR user_process_check_wifi_conn(void)
 	vPortFree(status);
 
 	return result;
-}
-
-// timeout in seconds!
-static int user_wifi_chk_connection(int timeout)
-{
-    int wait_cnt = 0;
-    while (1) {
-        if (user_process_check_wifi_conn() == pdFALSE) {
-            vTaskDelay(pdMS_TO_TICKS(1000));
-
-            wait_cnt++;
-            if (wait_cnt == timeout) {
-                PRINTF("wifi connection timeout!, check your configuration \r\n");
-                return pdFALSE;
-            }
-        } else {
-            return pdTRUE;
-        }
-    }
-}
-
-
-
-
-// timeout in seconds!
-static int user_mqtt_chk_connection(int timeout)
-{
-    int wait_cnt = 0;
-    while (1) {
-        if (!mqtt_client_check_conn()) {
-            vTaskDelay(pdMS_TO_TICKS(1000));
-
-            wait_cnt++;
-            if (wait_cnt == timeout) {
-                PRINTF("mqtt connection timeout!, check your configuration \r\n");
-                return pdFALSE;
-            }
-        } else {
-            return pdTRUE;
-        }
-    }
 }
 
 
@@ -2312,7 +1961,7 @@ static int user_mqtt_send_message(void)
 
 	unsigned long timeout_qos = 0;
 	timeout_qos = (unsigned long) (pdMS_TO_TICKS(MQTT_QOS_TIMEOUT_MS) / 10);
-	PRINTF("\n>>timeout qos: %lu \n", timeout_qos);
+	PRINTF("\n Neuralert: [%s] timeout qos: %lu", __func__, timeout_qos);
 
 	// note, don't call mqtt_client_send_message_with_qos in sub_client.c
 	// there is a race condition in that function.  We use the following which
@@ -2344,16 +1993,16 @@ static int user_mqtt_send_message(void)
  */
 static void user_process_MQTT_stop(void* arg)
 {
-	PRINTF (">>>>>> Forcibly Stopping MQTT Client <<<<<<<<");
+	PRINTF ("\n Neuralert: [%s] Forcibly Stopping MQTT Client", __func__);
     if (mqtt_client_is_running() == TRUE) {
         mqtt_client_force_stop();
         mqtt_client_stop();
     }
 
-    CLR_BIT(processLists, USER_PROCESS_MQTT_STOP);
+    clr_process_bit(USER_PROCESS_MQTT_STOP);
     vTaskDelay(1);
 
-    PRINTF (">>>>>> MQTT Client Stopped <<<<<<<<");
+    PRINTF ("\n Neuralert: [%s] MQTT Client Stopped", __func__);
 
     user_MQTT_stop_task_handle = NULL;
     vTaskDelete(NULL);
@@ -2377,12 +2026,10 @@ static void user_process_MQTT_stop(void* arg)
 static void user_process_watchdog(void* arg)
 {
 
-	int sys_wdog_id = -1;
-
-	sys_wdog_id = da16x_sys_watchdog_register(pdFALSE);
+	int sys_wdog_id = da16x_sys_watchdog_register(pdFALSE);
 
 	int timeout = WATCHDOG_TIMEOUT_SECONDS * 10;
-	while (BIT_SET(processLists, USER_PROCESS_WATCHDOG) && timeout > 0)
+	while (process_bit_set(USER_PROCESS_WATCHDOG) && timeout > 0)
 	{
 		vTaskDelay(pdMS_TO_TICKS(100)); // 100 ms delay
 		timeout--;
@@ -2390,8 +2037,8 @@ static void user_process_watchdog(void* arg)
 	}
 
 	// The Process bit should have been cleared in user_process_send_MQTT_data()
-	if (BIT_SET(processLists, USER_PROCESS_WATCHDOG)){
-		PRINTF ("\n*** WIFI and MQTT Connection Watchdog Timeout ***\n");
+	if (process_bit_set(USER_PROCESS_WATCHDOG)){
+		PRINTF ("\n Neuralert: [%s] WIFI and MQTT Connection Watchdog Timeout", __func__);
 		increment_MQTT_stat(&(pUserData->MQTT_stats_connect_fails));
 		da16x_sys_watchdog_notify(sys_wdog_id);
 		da16x_sys_watchdog_suspend(sys_wdog_id);
@@ -2399,9 +2046,9 @@ static void user_process_watchdog(void* arg)
 		da16x_sys_watchdog_notify_and_resume(sys_wdog_id);
 	}
 
-	PRINTF ("\n>>> Stopping Watchdog Task <<<\n");
-	CLR_BIT(processLists, USER_PROCESS_WATCHDOG);
-	CLR_BIT(processLists, USER_PROCESS_WATCHDOG_STOP);
+	PRINTF ("\n Neuralert: [%s] Stopping watchdog task", __func__);
+	clr_process_bit(USER_PROCESS_WATCHDOG);
+	clr_process_bit(USER_PROCESS_WATCHDOG_STOP);
 
 	da16x_sys_watchdog_unregister(sys_wdog_id);
 
@@ -2425,7 +2072,7 @@ static int user_process_start_watchdog()
 
 	if (user_watchdog_task_handle != NULL){
 		PRINTF("\n Neuralert: [%s] Watchdog task already running -- Not starting transmission", __func__);
-		return -2; //TODO: remove hard coding
+		return -2;
 	}
 
 
@@ -2433,8 +2080,8 @@ static int user_process_start_watchdog()
 
 	create_status = xTaskCreate(
 			user_process_watchdog,
-			"USER_WATCHDOG", 			// Task name -- TODO: move this to a #define
-			(3072),						// 256 stack size for comfort
+			"USER_WATCHDOG", 			// Task name
+			(3072),						// stack size for comfort
 			( void * ) NULL,  			// no parameter to pass
 			(OS_TASK_PRIORITY_USER + 2),	// Make this lower than USER_READ task in user_apps.c
 			&user_watchdog_task_handle);			// save the task handle
@@ -2442,12 +2089,12 @@ static int user_process_start_watchdog()
 	if (create_status == pdPASS)
 	{
 		PRINTF("\n Neuralert: [%s] Watchdog task created\n", __func__);
-		return 0; // TODO: remove hardcoding
+		return 0;
 	}
 	else
 	{
 		PRINTF("\n Neuralert: [%s] Watchdog task failed to create -- Not starting transmission", __func__);
-		return -1; // TODO: remove hardcoding
+		return -1;
 	}
 
 }
@@ -2467,26 +2114,19 @@ static int user_process_start_watchdog()
 
 void user_retry_transmit(void)
 {
-	int sys_wdog_id = -1;
-	sys_wdog_id = da16x_sys_watchdog_register(pdFALSE);
-
-#if defined(__RUNTIME_CALCULATION__) && defined(XIP_CACHE_BOOT)
-	printf_with_run_time("\n===user_retry_transmit called");
-#endif
-
+	int sys_wdog_id = da16x_sys_watchdog_register(pdFALSE);
 
 	// First, turn off the watchdog -- we'll need to restart it in a bit.
 	// if we can't then let the hardware watchdog timeout.
 	// there should be nothing blocking this for very long
-	SET_BIT(processLists, USER_PROCESS_WATCHDOG_STOP);
-	CLR_BIT(processLists, USER_PROCESS_WATCHDOG);
+	set_process_bit(USER_PROCESS_WATCHDOG_STOP);
+	clr_process_bit(USER_PROCESS_WATCHDOG);
 	da16x_sys_watchdog_notify(sys_wdog_id);
 
 	// Wait until the watchdog is stopped (these aren't high-priority tasks,
 	// so we may need to wait a bit.
-	// If the watchdog doesn't stop, we hardware watchdog will handle a reset.
-
-	while (!BIT_SET(processLists, USER_PROCESS_WATCHDOG_STOP)){
+	// If the watchdog doesn't stop, the hardware watchdog will handle a reset.
+	while (!process_bit_set(USER_PROCESS_WATCHDOG_STOP)){
 		vTaskDelay(pdMS_TO_TICKS(200));
 	}
 	da16x_sys_watchdog_notify(sys_wdog_id);
@@ -2500,8 +2140,8 @@ void user_retry_transmit(void)
     da16x_sys_watchdog_notify_and_resume(sys_wdog_id);
 
 	// Set the process bits for a clean retry
-	SET_BIT(processLists, USER_PROCESS_MQTT_TRANSMIT);
-	SET_BIT(processLists, USER_PROCESS_WATCHDOG);
+	set_process_bit(USER_PROCESS_MQTT_TRANSMIT);
+	set_process_bit(USER_PROCESS_WATCHDOG);
 
 	// Restart the application watchdog
 	da16x_sys_watchdog_notify(sys_wdog_id);
@@ -2533,31 +2173,10 @@ void user_retry_transmit(void)
 static void user_process_send_MQTT_data(void* arg)
 {
 	int status = 0;
-	int ret = 0;
-	char reply[128] = {0, }; // JW: was 128 not 32
-	//int clear_to_transmit = FALSE; //JW: This is now dead thanks to callbacks
-	int samples_to_send;
+
 	int send_start_addr;
 	int msg_sequence;
-	int whole_packets_to_send;
-	int last_packet_size;
-	int WIFI_status;
-	int MQTT_status;
-	int MQTT_client_state;
 	int transmit_start_loc;
-	//int transmit_end_loc;
-	//int transmit_memory_size;	// last index before wraparound
-	int next_write_position;	// next place AXL will write a block
-	int last_write_position;	// last place AXL wrote a block
-	int total_blocks_stored;	// total number of blocks available to send when wakened
-	int total_blocks_free;		// total number of blocks AXL has free to write
-	int num_blocks_to_send;		// number of FIFO blocks to transmit this interval
-	//int num_blocks_left_to_send;	// Countdown of what we have left to do -- JW: deprecated
-
-	int this_packet_start_block;	// where the current packet starts in AB
-	int this_packet_end_block;		// where the current packet ends in AB
-	int this_packet_num_blocks;		// how many FIFO blocks in the current packet
-	int next_packet_start_block;	// where the subsequent packet will start
 	int request_stop_transmit = pdFALSE;		// loop control for packet transmit loop
 	int request_retry_transmit = pdFALSE;
 	int transmit_complete = pdFALSE;
@@ -2567,32 +2186,17 @@ static void user_process_send_MQTT_data(void* arg)
 
 	// stats
 	int packets_sent = 0;		// actually sent during this transmission interval
-	//int blocks_sent = 0;
 	int samples_sent = 0;
-
-	int drop_data_skip_to_loc;		// start location of where we will transmit after dropping data
-
-	int sys_wdog_id = -1;			// watchdog
-
 	UCHAR elapsed_sec_string[40];
 
-#ifdef CFG_USE_RETMEM_WITHOUT_DPM
-	UINT32 i;
-#else
-	int len = 0;
-	char data_buffer[TCP_CLIENT_TX_BUF_SIZE] = {0x00,};
-#endif
-
 	// Start up watchdog
-	sys_wdog_id = da16x_sys_watchdog_register(pdFALSE);
-
+	int sys_wdog_id = da16x_sys_watchdog_register(pdFALSE);
 
 	// We've successfully made it to the transmission task!
 	// Clear the watchdog process bit that was monitoring for this task to start
 	// The watchdog will shutdown itself later regardless.
-	CLR_BIT(processLists, USER_PROCESS_WATCHDOG);
+	clr_process_bit(USER_PROCESS_WATCHDOG);
 	vTaskDelay(1);
-
 
 	// Wait until MQTT is actually connected before proceeding
 	// it takes a couple of seconds from when the MQTT connected callback is called
@@ -2612,27 +2216,15 @@ static void user_process_send_MQTT_data(void* arg)
 		goto end_of_task;
 	}
 
-
-
 	// Mark our start time
 	user_time64_msec_since_poweron(&user_MQTT_start_msec);
 	time64_string(elapsed_sec_string, &user_MQTT_start_msec);
-	PRINTF("\n ===== MQTT start milliseconds %s\n\n", elapsed_sec_string);
-
-	log_current_time("MQTT connection attempt. ");
-
-//	PRINTF("\n**********************************************\n");
-//	PRINTF("**Neuralert: user_process_send_MQTT_data\n"); // FRSDEBUG
-#if defined(__RUNTIME_CALCULATION__) && defined(XIP_CACHE_BOOT)
-	printf_with_run_time("=********** user_process_send_MQTT_data **********");
-#endif
+	PRINTF("\n Neuralert: [%s] MQTT start milliseconds %s\n\n", __func__, elapsed_sec_string);
 	vTaskDelay(1);
 
 
 	// Retrieve the starting transmit block location
 	transmit_start_loc = get_AB_write_location(); // start where the NEXT write will take place
-	//transmit_start_loc = get_AB_transmit_location(); //JW: deprecated 10.3
-	//transmit_memory_size = AB_FLASH_MAX_PAGES; // JW: deprecated 10.3
 
 	// If there is no valid transmit position, we've been wakened by mistake
 	// or something else has gone wrong
@@ -2641,7 +2233,6 @@ static void user_process_send_MQTT_data(void* arg)
 			|| (transmit_start_loc >= AB_FLASH_MAX_PAGES))
 	{
 		PRINTF("\n Neuralert: [%s] MQTT task found invalid transmit start location: %d", __func__, transmit_start_loc);
-		//set_sole_system_state(USER_STATE_INTERNAL_ERROR); JW: deprecated 10.4 -- no reason to tell the patient
 		goto end_of_task;
 	}
 
@@ -2655,14 +2246,7 @@ static void user_process_send_MQTT_data(void* arg)
 		transmit_start_loc += AB_FLASH_MAX_PAGES;
 	}
 
-	PRINTF("\n\n******  MQTT transmit starting at %d ******\n", transmit_start_loc);
-
-
-
-	// We now know where we're going to start transmission and are ready to begin
-	// the MQTT portion.
-
-
+	PRINTF("\n Neuralert: [%s] MQTT transmit starting at %d", __func__, transmit_start_loc);
 
 	// *****************************************************************
 	//  MQTT transmission
@@ -2685,18 +2269,13 @@ static void user_process_send_MQTT_data(void* arg)
 	++pUserData->MQTT_message_number;  // Increment transmission #
 	pUserData->MQTT_inflight = 0; // This is a new transmission, clear any lingering inflight issues
 
-
-
 	// Set up transmit loop parameters
-	//num_blocks_left_to_send = num_blocks_to_send; // JW: deprecated
 	packet_data.next_start_block = transmit_start_loc;
 
 	vTaskDelay(1);
 	request_stop_transmit = pdFALSE;
 	packet_count = 0;
-	//JW: the while statement below used the number of blocks to exit -- this is no longer the case
-	//while (	(num_blocks_left_to_send > 0)
-	//		&& (pdFALSE == request_stop_transmit) )
+	// Execute transmissions until done or told to stop
 	while ((request_stop_transmit == pdFALSE)
 			&& (transmit_complete == pdFALSE))
 	{
@@ -2705,12 +2284,9 @@ static void user_process_send_MQTT_data(void* arg)
 		// assemble the packet into the user data
 		packet_data = assemble_packet_data(packet_data.next_start_block);
 
-		PRINTF("\n**MQTT packet %d:  Start: %d End: %d num blocks: %d\n",
+		PRINTF("\n Neuralert: [%s] MQTT packet %d:  Start: %d End: %d num blocks: %d", __func__,
 				packet_count, packet_data.start_block, packet_data.end_block,
 				packet_data.num_blocks);
-
-
-
 
 		if (packet_data.num_samples < 0)
 		{
@@ -2725,17 +2301,15 @@ static void user_process_send_MQTT_data(void* arg)
 		{
 			msg_sequence++;
 			send_start_addr = 0;
-			//JW: The following line user_set_mid_sent(...) is now deprecated -- to be removed
-			//user_set_mid_sent(pUserData->MQTT_last_message_id); // Probably could/should do this once when creating the MQTT client
 			da16x_sys_watchdog_notify(sys_wdog_id);
 			da16x_sys_watchdog_suspend(sys_wdog_id);
-			status = send_json_packet (send_start_addr, packet_data,
-					pUserData->MQTT_message_number, msg_sequence);
+			status = send_json_packet(send_start_addr, packet_data, pUserData->MQTT_message_number, msg_sequence);
 			da16x_sys_watchdog_notify_and_resume(sys_wdog_id);
 			if(status == 0) //Tranmission successful!
 			{
 				clear_MQTT_stat(&(pUserData->MQTT_attempts_since_tx_success));
-				CLR_BIT(processLists, USER_PROCESS_BOOTUP); //JW: we have succeeded in a transmission (bootup complete), so clear the bootup state bit.
+				//we have succeeded in a transmission (bootup complete), so clear the bootup state bit.
+				clr_process_bit(USER_PROCESS_BOOTUP);
 				notify_user_LED(); // notify the led
 
 				// Clear the transmission map corresponding to blocks in the packet
@@ -2744,7 +2318,7 @@ static void user_process_send_MQTT_data(void* arg)
 					// clear from "end" to "start" (because LIMO works backwards through the map)
 					if (!clear_AB_transmit_location(packet_data.end_block, packet_data.start_block))
 					{
-						PRINTF("MQTT: transmit map failed to update\n");
+						PRINTF("\nNeuralert: [%s] MQTT transmit map failed to update", __func__);
 					}
 
 				}
@@ -2753,27 +2327,18 @@ static void user_process_send_MQTT_data(void* arg)
 					// clear from "0" to "start" and from "end" to AB_MAX_FLASH_PAGES-1
 					if (!clear_AB_transmit_location(0, packet_data.start_block))
 					{
-						PRINTF("MQTT: transmit map failed to update\n");
+						PRINTF("\nNeuralert: [%s] MQTT transmit map failed to update", __func__);
 					}
 					if (!clear_AB_transmit_location(packet_data.end_block, AB_FLASH_MAX_PAGES-1))
 					{
-						PRINTF("MQTT: transmit map failed to update\n");
+						PRINTF("\nNeuralert: [%s] MQTT transmit map failed to update", __func__);
 					}
 				}
 
-				// Do stats
-
+				// Do the stats
 				increment_MQTT_stat(&(pUserData->MQTT_stats_packets_sent));
 				packets_sent++;		// Total packets sent this interval
-				//blocks_sent += packet_data.num_blocks; //JW: deprecated 10.4
 				samples_sent += packet_data.num_samples;
-//						PRINTF("**Neuralert: send_data: transmit %d:%d successful\n",
-//								pUserData->MQTT_message_number, msg_sequence); // FRSDEBUG
-#if defined(__RUNTIME_CALCULATION__) && defined(XIP_CACHE_BOOT)
-	printf_with_run_time("===JSON packet sent");
-#endif
-
-
 			}
 			else if (pUserData->MQTT_tx_attempts_remaining > 0){
 				PRINTF("\n Neuralert: [%s] MQTT transmission %d:%d failed. Remaining attempts %d. Retry Transmission",
@@ -2793,20 +2358,13 @@ static void user_process_send_MQTT_data(void* arg)
 
 		} // num_samples > 0
 
-
-		//PRINTF("\n Packet data flag = %d\n", packet_data.done_flag);
-
 		if (packet_data.done_flag == pdTRUE){
 			transmit_complete = pdTRUE; // there is no more data after this packet.
 		}
-
-
 	} // while we have stuff to transmit
-
 
 	if(!request_stop_transmit)
 	{
-
 		increment_MQTT_stat(&(pUserData->MQTT_stats_transmit_success));
 		PRINTF("\n Neuralert: [%s] MQTT transmission %d complete.  %d samples in %d JSON packets",
 				__func__, pUserData->MQTT_message_number, samples_sent, packets_sent);
@@ -2816,8 +2374,6 @@ static void user_process_send_MQTT_data(void* arg)
 	// Presumably we've finished sending and allowed time for a shutdown
 	// command or other message back from the cloud
 	// Turn off the RF section until next transmit interval
-
-
 end_of_task:
 	da16x_sys_watchdog_notify(sys_wdog_id);
 	da16x_sys_watchdog_suspend(sys_wdog_id);
@@ -2832,16 +2388,13 @@ end_of_task:
 	da16x_sys_watchdog_unregister(sys_wdog_id);
 	user_MQTT_task_handle = NULL;
 	vTaskDelete(NULL);
-
-
 }
 
 
 void user_process_wifi_conn()
 {
-	if (!BIT_SET(processLists, USER_PROCESS_MQTT_TRANSMIT)){
-		PRINTF(">>>>>>> MQTT transmit task already in progress <<<<<<<<<\n");
-		return;
+	if (!process_bit_set(USER_PROCESS_MQTT_TRANSMIT)){
+		PRINTF("\n Neuralert: [%s] MQTT transmit task already in progress", __func__);
 	}
 }
 
@@ -2853,32 +2406,26 @@ void user_process_wifi_conn()
  */
 void user_start_MQTT_client()
 {
-	// TODO: add a check for wifi connection here.
-
 
 	// MQTT client is affected by the network state.  Since the network should be up at this point,
 	// we have two scenarios:
 	// 1) client is already running -- in which case we go straight to creating the transmit task
 	// 2) the client is not running -- in which case we start the client and process the request on a callback.
 	if (mqtt_client_check_conn()){
-		PRINTF("\n**Neuralert: MQTT client already started"); // FRSDEBUG
-		//user_mqtt_connection_complete_event(); // If client is started, start the transmisson
-		//user_create_MQTT_task(); // If client is started, start the transmit -- this is handled differently now.
+		PRINTF("\nNeuralert: [%s] MQTT client already started", __func__);
 	} else {
 		int status = 0;
 		status = mqtt_client_start(); // starts the MQTT client
 
 		if(status == 0)
 		{
-			PRINTF("\n**Neuralert: MQTT client start success -- waiting for connection"); // FRSDEBUG
+			PRINTF("\nNeuralert: [%s] MQTT client start success -- waiting for connection", __func__);
 		}
 		else
 		{
-			PRINTF("\n**Neuralert: MQTT client start failed\n"); // FRSDEBUG
+			PRINTF("\nNeuralert: [%s] MQTT client start failed", __func__);
 		}
 	}
-
-	return;
 }
 
 
@@ -2902,7 +2449,7 @@ static void user_start_data_tx(){
 
 	// Specifically, let the other tasks know that the watchdog is turning on,
 	// so we don't sleep
-	SET_BIT(processLists, USER_PROCESS_WATCHDOG);
+	set_process_bit(USER_PROCESS_WATCHDOG);
 
 	int ret = 0;
 	ret = user_process_start_watchdog();
@@ -2917,11 +2464,11 @@ static void user_start_data_tx(){
 	// (i) let the other tasks know that MQTT transmit has been requested so we don't sleep
 	// (ii) reset the MQTT attempts counter for this TX cycle to zero
 	// Note, the watchdog process (above) will clear before the MQTT transmit completes,
-	// so we need both bits set to stay awake until transmittion is complete
-	SET_BIT(processLists, USER_PROCESS_MQTT_TRANSMIT);
+	// so we need both bits set to stay awake until transmission is complete
+	set_process_bit(USER_PROCESS_MQTT_TRANSMIT);
 	vTaskDelay(1);
 
-	// Intialize the maximum number of retries here -- this can't be done in
+	// Initialize the maximum number of retries here -- this can't be done in
 	// user_create_MQTT_task() since that function will be called when we restart
 	// the client.  We do it here because this is the entry point data transmission
 	pUserData->MQTT_tx_attempts_remaining = MQTT_MAX_ATTEMPTS_PER_TX;
@@ -2931,14 +2478,9 @@ static void user_start_data_tx(){
 	// Start the RF section power up
 	wifi_cs_rf_cntrl(FALSE);
 
-	// JW: switched this to system_control_wlan_enable in 1.10.16
 	char value_str[128] = {0, };
-	ret = da16x_cli_reply("select_network 0", NULL, value_str);
+	da16x_cli_reply("select_network 0", NULL, value_str);
 
-	//system_control_wlan_enable(TRUE);
-
-
-	return;
 }
 
 
@@ -2952,8 +2494,8 @@ static void user_start_data_tx(){
 static void user_create_MQTT_stop_task()
 {
 
-	if (!BIT_SET(processLists, USER_PROCESS_MQTT_STOP)){
-		PRINTF(">>>>>>> MQTT stop not requested <<<<<<<<<\n");
+	if (!process_bit_set(USER_PROCESS_MQTT_STOP)){
+		PRINTF("\n Neuralert: [%s] MQTT stop not requested", __func__);
 		return;
 	}
 
@@ -2961,14 +2503,10 @@ static void user_create_MQTT_stop_task()
 
 	create_status = xTaskCreate(
 			user_process_MQTT_stop,
-			"USER_MQTT_STOP", 				// Task name -- TODO: move this to a #define
-			(4*1024),					//JW: need to confirm this size
+			"USER_MQTT_STOP", 				// Task name
+			(4*1024),					// healthy size
 			( void * ) NULL,  			// no parameter to pass
-//			(current_task_priority + 1),  // Make this a higher priority than accelerometer
-//			(current_task_priority - 1),  // Make this a lower priority
-//			OS_TASK_PRIORITY_USER + 1,	// Make this higher than accelerometer
 			(OS_TASK_PRIORITY_USER + 2),	// Make this lower than USER_READ task in user_apps.c
-//		  (tskIDLE_PRIORITY + 6), 		// one less than accelerometer
 			&user_MQTT_stop_task_handle);			// save the task handle
 
 	if (create_status == pdPASS)
@@ -2979,11 +2517,7 @@ static void user_create_MQTT_stop_task()
 	{
 		PRINTF("\n Neuralert: [%s] MQTT stop task failed to created", __func__);
 	}
-
-	return;
 }
-
-
 
 
 
@@ -2995,31 +2529,24 @@ static void user_create_MQTT_stop_task()
 static void user_create_MQTT_task()
 {
 
-	if (!BIT_SET(processLists, USER_PROCESS_MQTT_TRANSMIT)){
-		PRINTF(">>>>>>> MQTT transmit task already in progress <<<<<<<<<\n");
+	if (!process_bit_set(USER_PROCESS_MQTT_TRANSMIT)){
+		PRINTF("\n Neuralert [%s] MQTT transmit task already in progress", __func__);
 		return;
 	}
 
 	extern struct mosquitto	*mosq_sub;
 	BaseType_t create_status;
 
-
 	// Prior to starting to transmit data, we need to store the message id state
 	// so we have unique message ids for each client message
 	mosq_sub->last_mid = pUserData->MQTT_last_message_id;
 
-
 	create_status = xTaskCreate(
 			user_process_send_MQTT_data,
-			"USER_MQTT", 				// Task name -- TODO: move this to a #define
-			(6*1024),					//JW: we've seen near 4K stack utilization in testing, doubling for safety.
-			//(4*1024),					// 4K stack size for comfort
+			"USER_MQTT", 				// Task name
+			(6*1024),					//we've seen near 4K stack utilization in testing, 50% buffer for safety.
 			( void * ) NULL,  			// no parameter to pass
-//			(current_task_priority + 1),  // Make this a higher priority than accelerometer
-//			(current_task_priority - 1),  // Make this a lower priority
-//			OS_TASK_PRIORITY_USER + 1,	// Make this higher than accelerometer
 			(OS_TASK_PRIORITY_USER + 2),	// Make this lower than USER_READ task in user_apps.c
-//		  (tskIDLE_PRIORITY + 6), 		// one less than accelerometer
 			&user_MQTT_task_handle);			// save the task handle
 
 	if (create_status == pdPASS)
@@ -3030,12 +2557,7 @@ static void user_create_MQTT_task()
 	{
 		PRINTF("\n Neuralert: [%s] MQTT transmit task failed to create", __func__);
 	}
-
-	return;
 }
-
-
-
 
 
 /**
@@ -3048,29 +2570,23 @@ static int user_process_connect_ap(void)
 {
 	int	ret = 0;
 
-	
-
-	PRINTF("\n**Neuralert: %s\n", __func__); // FRSDEBUG
+	PRINTF("\n Neuralert: [%s]", __func__);
 
 	if (user_process_check_wifi_conn() == pdTRUE) {
-		PRINTF("\n**Neuralert: user_process_connect_ap() already connected\n"); // FRSDEBUG
+		PRINTF("\n Neuralert: [%s] already connected", __func__);
 
 		/* Connection is already established */
-//		user_wifi_connection_complete_event();
 		return ret;
 	}
 
 	// use the internal command line interface to connect
-	PRINTF("\n**Neuralert: user_process_connect_ap() attempting connection\n"); // FRSDEBUG
+	PRINTF("\n Neuralert: [%s] attempting connection", __func__);
 
-	//JW: changed this to system_control_wlan_enable(TRUE) in 1.10.16
 	char value_str[128] = {0, };
 	ret = da16x_cli_reply("select_network 0", NULL, value_str);
 	if (ret < 0 || strcmp(value_str, "FAIL") == 0) {
-		PRINTF(" [%s] Failed connect to AP 0x%x\n", __func__, ret, value_str);
+		PRINTF("\n Neuralert: [%s] Failed connect to AP 0x%x\n", __func__, ret, value_str);
 	}
-
-	//system_control_wlan_enable(TRUE);
 
 	return ret;
 }
@@ -3085,182 +2601,21 @@ static int user_process_connect_ap(void)
  */
 static int user_process_disable_auto_connection(void)
 {
-	int ret, netProfileUse;
+	int netProfileUse;
 	PRINTF("\n**Neuralert: %s\n", __func__); // FRSDEBUG
 
 	/* To skip automatic network connection. It will be effected when boot-up. */
-	ret = da16x_get_config_int(DA16X_CONF_INT_STA_PROF_DISABLED, &netProfileUse);
+	int ret = da16x_get_config_int(DA16X_CONF_INT_STA_PROF_DISABLED, &netProfileUse);
 	if (ret != CC_SUCCESS || netProfileUse == pdFALSE) {
 		ret = da16x_set_config_int(DA16X_CONF_INT_STA_PROF_DISABLED, pdTRUE);
-		PRINTF("\n****** Disabling automatic network connection\n\n");
+		PRINTF("\n Neuralert [%s] Disabling automatic network connection", __func__);
 		/* It's just to give some delay before going to sleep mode.
 		 *  it will be called only once.
 		 */
 		vTaskDelay(3);
 	}
-
 	return ret;
 }
-
-
-
-/**
- *******************************************************************************
- * @brief Process for initializing the "holding" area of the
- *  user log mechanism.  This is intended to allow early
- *  initialization before the flash area is initialized
- *  so that we can catch early information during initial
- *  device activation.
- *
- * Log entries are held in retention memory until they are
- * periodically transferred to flash.
- *
- * See document "Neuralert system logging design" for
- * details of this design
- *
- * returns pdTRUE if initialization succeeds
- * returns pdFALSE is a problem happens with the Flash initialization
- *******************************************************************************
- */
-static void user_process_initialize_user_log_holding(void)
-{
-	// Initialize buffer pointers
-	// Note that pointers are Indexes and not addresses
-	// (i.e., start at 0 and increment by 1)
-
-	// Holding area in retention memory
-	pUserData->next_log_holding_position = 0;
-	pUserData->oldest_log_holding_position = INVALID_AB_ADDRESS;
-	// Set the area-initialized flag
-	pUserData->user_holding_log_initialized = AB_MANAGEMENT_INITIALIZED;
-
-}
-
-
-
-
-/**
- *******************************************************************************
- * @brief Process for initializing the user log mechanism
- *  including erasing a sector of the external data Flash
- *
- *  NOTE - this should be called AFTER the accelerometer
- *  buffering (AB) area has been initialized since that
- *  does flash initialization.
- *
- * Log entries are held in retention memory until they are
- * periodically transferred to flash.
- *
- * Because the external flash memory is written with a "Page write"
- * command, each log entryh starts on a 256-byte page
- * boundary.
- *
- * Additionally, the flash must be erased before it can be written.
- * The smallest erase function is a 4096 byte sector (16 pages)
- *
- * See document "Neuralert system logging design" for
- * details of this design
- *
- * returns pdTRUE if initialization succeeds
- * returns pdFALSE is a problem happens with the Flash initialization
- *******************************************************************************
- */
-static int user_process_initialize_user_log(void)
-{
-	int spi_status;
-	int erase_status;
-//	int unlock_status;
-	int init_status = TRUE;
-	UINT8 rx_data[3];
-	ULONG SectorEraseAddr;
-	HANDLE SPI = NULL;		// Local SPI bus handle for this activity
-
-	PRINTF(">>>Initializing user log in flash\n");
-	vTaskDelay(pdMS_TO_TICKS(100));
-
-
-
-	/*
-	 * Initialize the SPI bus
-	 */
-//	spi_flash_config_pin();	// Hack to reconfigure the pin multiplexing
-
-	// Get handle for the SPI bus
-	SPI = flash_open(SPI_MASTER_CLK, SPI_MASTER_CS);
-	if (SPI == NULL)
-	{
-		PRINTF("\n\n********* Initialize user log SPI flash open error *********\n");
-		init_status = FALSE;
-	}
-
-	// Do device initialization
-//	spi_status = w25q64Init(SPI, rx_data);
-
-//	if (!spi_status)
-//	{
-//		PRINTF("\n\n********* SPI initalization error *********\n");
-//		init_status = FALSE;
-//	}
-
-	// Initialize buffer pointers
-	// Note that pointers are Indexes and not addresses
-	// (i.e., start at 0 and increment by 1)
-
-	// Holding area in retention memory
-	// Note done in separate function
-//	pUserData->next_log_holding_position = 0;
-//	pUserData->oldest_log_holding_position = INVALID_AB_ADDRESS;
-
-	// Next location to write IN FLASH
-	pUserData->next_log_entry_write_position = 0;
-
-	// Set the oldest log entry to an invalid value until
-	// something is written to the log
-	pUserData->oldest_log_entry_position = INVALID_AB_ADDRESS;
-
-	// Erase the first sector where the first 16 log entries will be
-	SectorEraseAddr = (ULONG)USERLOG_FLASH_BEGIN_ADDRESS +
-				((ULONG)AB_FLASH_PAGE_SIZE * (ULONG)pUserData->next_log_entry_write_position);
-	Printf("\n  Erasing first log sector. Location: %x \n",SectorEraseAddr);
-//	Printf("  Erasing Chip  \n");
-
-#if defined(__RUNTIME_CALCULATION__) && defined(XIP_CACHE_BOOT)
-	printf_with_run_time("======= about to erase log sector");
-//	printf_with_run_time("======= about to erase chip");
-#endif
-
-	erase_status = eraseSector_4K(SPI, SectorEraseAddr);
-//	erase_status = eraseChip(SPI);
-//	vTaskDelay(pdMS_TO_TICKS(500));
-
-#if defined(__RUNTIME_CALCULATION__) && defined(XIP_CACHE_BOOT)
-	printf_with_run_time("======= done erasing log sector");
-//	printf_with_run_time("======= done erasing chip");
-#endif
-
-	if(!erase_status)
-	{
-		PRINTF("\n\n********* User log SPI erase error *********\n");
-		init_status = FALSE;
-	}
-
-	if (init_status == TRUE)
-	{
-		// Set the area-initialized flag
-		pUserData->user_log_initialized_flag = AB_MANAGEMENT_INITIALIZED;
-	}
-	else
-	{
-		// Clear the area-initialized flag
-		pUserData->user_log_initialized_flag = 0;
-
-	}
-
-	spi_status = flash_close(SPI);
-	return init_status;
-
-}
-
 
 
 /**
@@ -3289,8 +2644,6 @@ static int user_process_initialize_AB(void)
 {
 	int spi_status;
 	int erase_status;
-//	int unlock_status;
-	int init_status = TRUE;
 	UINT8 rx_data[3];
 	ULONG SectorEraseAddr;
 	HANDLE SPI = NULL;
@@ -3312,24 +2665,21 @@ static int user_process_initialize_AB(void)
 	/*
 	 * Initialize the SPI bus and the Winbond external flash
 	 */
-//	spi_flash_config_pin();	// Hack to reconfigure the pin multiplexing
 
 	// Get handle for the SPI bus
 	SPI = flash_open(SPI_MASTER_CLK, SPI_MASTER_CS);
 	if (SPI == NULL)
 	{
-		PRINTF("\n\n********* SPI initalization error *********\n");
-		init_status = FALSE;
+		PRINTF("\n Neuralert: [%s] SPI initalization error", __func__);
+		return pdFALSE;
 	}
-//	vTaskDelay(1);
 
 	// Do device initialization
 	spi_status = w25q64Init(SPI, rx_data);
-
 	if (!spi_status)
 	{
-		PRINTF("\n\n********* SPI initalization error *********\n");
-		init_status = FALSE;
+		PRINTF("\n Neuralert: [%s] SPI initalization error", __func__);
+		return pdFALSE;
 	}
 
 	// Initialize accelerometer buffering pointers
@@ -3338,10 +2688,6 @@ static int user_process_initialize_AB(void)
 
 	// Next location to write
 	pUserData->next_AB_write_position = 0;
-
-	// Set the next transmit position to an invalid value until
-	// there is something to transmit
-	pUserData->next_AB_transmit_position = INVALID_AB_ADDRESS;
 
 	// Initialize all the positions to not needing transmission
 	for (i = 0; i < AB_TRANSMIT_MAP_SIZE; i++)
@@ -3352,165 +2698,21 @@ static int user_process_initialize_AB(void)
 	// Erase the first sector where the first data will be written
 	SectorEraseAddr = (ULONG)AB_FLASH_BEGIN_ADDRESS +
 				((ULONG)AB_FLASH_PAGE_SIZE * (ULONG)pUserData->next_AB_write_position);
-	PRINTF("  Erasing first Sector Location: %x \n",SectorEraseAddr);
-//	Printf("  Erasing Chip  \n");
-
-#if defined(__RUNTIME_CALCULATION__) && defined(XIP_CACHE_BOOT)
-	printf_with_run_time("======= about to erase sector");
-//	printf_with_run_time("======= about to erase chip");
-#endif
+	PRINTF("\n Neuralert: [%s] Erasing first Sector Location: %x",__func__, SectorEraseAddr);
 
 	erase_status = eraseSector_4K(SPI, SectorEraseAddr);
-//	erase_status = eraseChip(SPI);
-//	vTaskDelay(pdMS_TO_TICKS(500));
-
-#if defined(__RUNTIME_CALCULATION__) && defined(XIP_CACHE_BOOT)
-	printf_with_run_time("======= done erasing sector");
-//	printf_with_run_time("======= done erasing chip");
-#endif
 
 	if(!erase_status)
 	{
-		PRINTF("\n\n********* SPI erase error *********\n");
-		init_status = FALSE;
-	}
-
-	if (init_status == TRUE)
-	{
-		// Set the area-initialized flag
-		pUserData->AB_initialized_flag = AB_MANAGEMENT_INITIALIZED;
-	}
-	else
-	{
-		// Clear the area-initialized flag
-		// This should prevent MQTT from trying to use it
-		pUserData->AB_initialized_flag = 0;
-
+		PRINTF("\n Neuralert: [%s] SPI erase error", __func__);
+		return pdFALSE;
 	}
 
 	flash_close(SPI);
 
-	return init_status;
+	return pdTRUE;
 
 }
-
-
-/**
- *******************************************************************************
- * @brief Process for clearing the accelerometer data buffering
- *  mechanism, including erasing the entire acceleromater data
- *  previously accumulated
- *
- *  Although only intended for device shutdown, this function leaves
- *  the AB area in a pristine state that could be used for a new
- *  cycle.
- *
- *  This function assumes that no other task is attempting to
- *  access external flash and so does not use the semaphores to
- *  gain exclusive access.
- *
- *  Note that we do NOT erase the entire flash chip because we don't
- *  want to disturb the system log.
- *
- * Data is stored in a structure that holds the data read during
- * one FIFO read event.
- * Because the external flash memory is written with a "Page write"
- * command, each FIFO storage structure starts on a 256-byte page
- * boundary.
- * As of this writing, the FIFO storage structure is less than 256 bytes
- * so each write is to the next page boundary.
- * Additionally, the flash must be erased before it can be written.
- * The smallest erase function is a 4096 byte sector (16 pages)
- *
- * See document "Neuralert accelerometer data buffer design" for
- * details of this design
- *
- * returns pdTRUE if initialization succeeds
- * returns pdFALSE is a problem happens with the Flash initialization
- *******************************************************************************
- */
-static int user_process_clear_AB(void)
-{
-	int spi_status;
-	int erase_status;
-	int clear_status = TRUE;		// our function return
-	UINT8 rx_data[3];
-	ULONG SectorEraseAddr;
-	HANDLE SPIhandle;
-	AB_INDEX_TYPE next_AB_clear_position;
-	int max_sectors;
-	int sectors_erased = 0;
-
-	/*
-	 * Initialize the SPI bus and the Winbond external flash
-	 */
-//	spi_flash_config_pin();	// Hack to reconfigure the pin multiplexing
-
-	// Get our own handle for the SPI bus
-	SPIhandle = flash_open(SPI_MASTER_CLK, SPI_MASTER_CS);
-	if (SPIhandle == NULL)
-	{
-		PRINTF("\n\n********* user_process_clear_AB: unable to obtain SPI handle *********\n");
-		clear_status = FALSE;
-	}
-//	vTaskDelay(1);
-
-	// Do device initialization
-	spi_status = w25q64Init(SPIhandle, rx_data);
-
-	if (!spi_status)
-	{
-		PRINTF("\n\n********* user_process_clear_AB: SPI initalization error *********\n");
-		clear_status = FALSE;
-	}
-
-	// Reset the accelerometer buffering pointers
-	// Note that pointers are Indexes and not addresses
-	// (i.e., start at 0 and increment by 1)
-
-	// Next location to write
-	pUserData->next_AB_write_position = 0;
-
-	// Set the next transmit position to an invalid value
-	pUserData->next_AB_transmit_position = INVALID_AB_ADDRESS;
-
-
-#if defined(__RUNTIME_CALCULATION__) && defined(XIP_CACHE_BOOT)
-	printf_with_run_time("== Starting to clear data buffering area");
-#endif
-
-	// As of 9/29/22, there are 3888 pages
-	// 3888 pages / 16 sectors per page = 243 4k sectors
-	max_sectors = AB_FLASH_MAX_PAGES / 16;
-	PRINTF("\n Neuralert: [%s] Shutting down - erasing %d sectors", __func__, max_sectors);
-	for(	next_AB_clear_position = 0;
-			next_AB_clear_position < max_sectors;
-			next_AB_clear_position++)
-	{
-		sectors_erased++;
-		// Calculate sector address
-		SectorEraseAddr = (ULONG)AB_FLASH_BEGIN_ADDRESS +
-				((ULONG)AB_FLASH_SECTOR_SIZE * (ULONG)next_AB_clear_position);
-		PRINTF("  Erasing sector %d: %x \n",sectors_erased, SectorEraseAddr);
-
-		// observed times for erasing are about 40-50 msec
-		erase_status = eraseSector_4K(SPIhandle, SectorEraseAddr);
-//		vTaskDelay(pdMS_TO_TICKS(50));
-		if(!erase_status)
-		{
-			PRINTF("\n********* user_process_clear_AB: SPI erase error *********\n");
-			clear_status = FALSE;
-		}
-	} // FOR LOOP
-#if defined(__RUNTIME_CALCULATION__) && defined(XIP_CACHE_BOOT)
-	printf_with_run_time("== Finished clearing data buffering area");
-#endif
-	PRINTF("Neuralert: [%s] Finished clearing data buffering area", __func__);
-	spi_status = flash_close(SPIhandle);
-	return clear_status;
-
-}
-
 
 /**
  *******************************************************************************
@@ -3538,6 +2740,7 @@ static int get_AB_write_location(void)
 			/* We have finished accessing the shared resource.  Release the
 	            semaphore. */
 			xSemaphoreGive( AB_semaphore );
+
 		}
 		else
 		{
@@ -3547,9 +2750,7 @@ static int get_AB_write_location(void)
 	else
 	{
 		PRINTF("\n ***AB semaphore not initialized!\n");
-
 	}
-
 	return return_value;
 
 }
@@ -3566,7 +2767,6 @@ static int get_AB_write_location(void)
 static int check_AB_transmit_location(int location, int bit_flag)
 {
 	int return_value = -1;
-
 	if(AB_semaphore != NULL )
 	{
 		/* See if we can obtain the semaphore.  If the semaphore is not
@@ -3585,7 +2785,7 @@ static int check_AB_transmit_location(int location, int bit_flag)
 					return_value = 0;
 				}
 			}
-			else if (bit_flag == pdFALSE)
+			else
 			{
 				if (pUserData->AB_transmit_map[location] == 0)
 				{
@@ -3595,7 +2795,6 @@ static int check_AB_transmit_location(int location, int bit_flag)
 				{
 					return_value = 1;
 				}
-
 			}
 
 
@@ -3616,49 +2815,6 @@ static int check_AB_transmit_location(int location, int bit_flag)
 	return return_value;
 }
 
-
-
-
-/**
- *******************************************************************************
- * @brief Process to retrieve the accelerometer buffer management
- * next-transmit location, making sure it's done with exclusive access
- *  Returns -1 if unable to gain exclusie access
- *  returns the AB next write position otherwise
- *
- *******************************************************************************
- */
-static int get_AB_transmit_location(void)
-{
-	int return_value = -1;
-
-	if(AB_semaphore != NULL )
-	{
-		/* See if we can obtain the semaphore.  If the semaphore is not
-	        available wait 10 ticks to see if it becomes free. */
-		if( xSemaphoreTake( AB_semaphore, ( TickType_t ) 10 ) == pdTRUE )
-		{
-			/* We were able to obtain the semaphore and can now access the
-	            shared resource. */
-			return_value = pUserData->next_AB_transmit_position;
-
-			/* We have finished accessing the shared resource.  Release the
-	            semaphore. */
-			xSemaphoreGive( AB_semaphore );
-		}
-		else
-		{
-			PRINTF("\n ***Unable to obtain AB semaphore\n");
-		}
-	}
-	else
-	{
-		PRINTF("\n ***AB semaphore not initialized!\n");
-	}
-
-	return return_value;
-
-}
 
 
 /**
@@ -3690,6 +2846,7 @@ static int clear_AB_transmit_location(int start_location, int end_location)
 				semaphore. */
 			xSemaphoreGive( AB_semaphore );
 			return_value = pdTRUE;
+
 		}
 		else
 		{
@@ -3702,60 +2859,6 @@ static int clear_AB_transmit_location(int start_location, int end_location)
 	}
 
 	return return_value;
-}
-
-
-
-/**
- *******************************************************************************
- * @brief Process to update the accelerometer buffer management
- * next-transmit location, making sure it's done with exclusive access
- *  Returns FALSE if unable to gain exclusive access
- *  returns TRUE otherwise
- *******************************************************************************
- */
-static int update_AB_transmit_location(int new_location)
-{
-	int return_value = pdFALSE;
-
-	// NOTE! this doesn't check to see if the MQTT task is running or
-	// not.  It is expected that this function will be called under
-	// the following circumstances:
-	//   1. The first read by the AXL task when it has to set the first
-	//      transmit.  MQTT should not be running then.
-	//   2. The MQTT task when it has finished transmitting and needs
-	//      to set up for the next transmit.  AXL should not have to
-	//      be updating at that  point.
-	//   3. (TBD) If the AXL task catches up to the MQTT task because
-	//      the MQTT task has been unable to transmit
-	if(AB_semaphore != NULL )
-	{
-		/* See if we can obtain the semaphore.  If the semaphore is not
-			available wait 10 ticks to see if it becomes free. */
-		if( xSemaphoreTake( AB_semaphore, ( TickType_t ) 10 ) == pdTRUE )
-		{
-	//		PRINTF("****** update_AB_transmit_location: new value %d ******\n", new_location);
-			/* We were able to obtain the semaphore and can now access the
-				shared resource. */
-			pUserData->next_AB_transmit_position = new_location;
-
-			/* We have finished accessing the shared resource.  Release the
-				semaphore. */
-			xSemaphoreGive( AB_semaphore );
-			return_value = pdTRUE;
-		}
-		else
-		{
-			PRINTF("\n ***Unable to obtain AB semaphore\n");
-		}
-	}
-	else
-	{
-		PRINTF("\n ***AB semaphore not initialized!\n");
-	}
-
-	return return_value;
-
 }
 
 
@@ -3806,6 +2909,8 @@ static int update_AB_write_location(void)
 				semaphore. */
 			xSemaphoreGive( AB_semaphore );
 			return_value = pdTRUE;
+
+			return return_value;
 		}
 		else
 		{
@@ -3817,60 +2922,10 @@ static int update_AB_write_location(void)
 		PRINTF("\n ***AB semaphore not initialized!\n");
 	}
 
-	return return_value;
+	// perform a reboot because of semaphore failure
+	user_reboot();
 
-}
-
-
-
-
-/**
- *******************************************************************************
- * @brief Process to retrieve one block of data from a flash page
- *  Returns pdFALSE if unable to read
- *  Returns pdTRUE and the returned data if able to read
- *******************************************************************************
- */
-static int flash_read_page_data(HANDLE SPI, UINT32 pageaddress, UCHAR *Pagedata, int Numbytes)
-{
-	int return_value = pdFALSE;
-	int spi_status;
-
-	if(Flash_semaphore != NULL )
-	{
-		/* See if we can obtain the semaphore.  If the semaphore is not
-	        available wait 10 ticks to see if it becomes free. */
-		if( xSemaphoreTake( Flash_semaphore, ( TickType_t ) 10 ) == pdTRUE )
-		{
-			/* We were able to obtain the semaphore and can now access the
-	            shared resource. */
-			// Now read the block
-			spi_status = pageRead(SPI, pageaddress, (UINT8 *)Pagedata, Numbytes);
-
-			if(spi_status < 0){
-				Printf("  ***** flash_read_page_data error reading loc 0x%x\n", pageaddress);
-				return_value = pdFALSE;
-			}
-			else
-			{
-				return_value = pdTRUE;
-			}
-
-			/* We have finished accessing the shared resource.  Release the
-	            semaphore. */
-			xSemaphoreGive( Flash_semaphore );
-		}
-		else
-		{
-			Printf("\n ***flash_read_page_data: Unable to obtain Flash semaphore\n");
-		}
-	}
-	else
-	{
-		Printf("\n ***flash_read_page_data: semaphore not initialized!\n");
-	}
-
-	return return_value;
+	return -1;
 
 }
 
@@ -4049,18 +3104,14 @@ static int AB_write_block(HANDLE SPI, int blockaddress, accelBufferStruct *FIFOd
 static int user_erase_flash_sector(HANDLE SPI, ULONG SectorEraseAddr)
 {
 
-//	ULONG SectorEraseAddr;
-	int spi_status;
 	int rerunCount;
 	int faultFlag = 1;
 	int erase_status;
 	UINT32 erase_mismatch_count;
-//	accelBufferStruct checkFIFO;	// copy for readback check
 	UCHAR FIFObytes[256];				// pointer used to access bytes of fifo
-//	int write_index;
-	int retry_count;
-	int fault_happened;
-	HANDLE MYSPI;   // experiment to try having own handle
+
+	int retry_count = 0;
+
 	int erase_confirmed;
 
 	// Our return status starts at ok until a problem occurs
@@ -4070,8 +3121,6 @@ static int user_erase_flash_sector(HANDLE SPI, ULONG SectorEraseAddr)
 	PRINTF(" Erase sector location: %x\n", SectorEraseAddr);
 	PRINTF("-------------------------------\n");
 
-	fault_happened = 1;
-	retry_count = 0;
 	erase_mismatch_count = 0;
 	pUserData->erase_attempts++;  // total sectors we tried to erase
 
@@ -4084,60 +3133,19 @@ static int user_erase_flash_sector(HANDLE SPI, ULONG SectorEraseAddr)
 				rerunCount++)
 	{
 		retry_count++;
-		// Hack to make sure our gpio pin mux mapping is ok
-		// (during development it seemed to go awry sometimes)
-//		spi_flash_config_pin();
-
-
-
-#if defined(__RUNTIME_CALCULATION__) && defined(XIP_CACHE_BOOT)
-			printf_with_run_time("======= about to erase sector");
-#endif
 
 		erase_status = eraseSector_4K(SPI, (UINT32)SectorEraseAddr);
 
-#if defined(__RUNTIME_CALCULATION__) && defined(XIP_CACHE_BOOT)
-		printf_with_run_time("======= done erasing sector");
-#endif
 		if(!erase_status)
 		{
 			PRINTF("\n\n********* eraseSector_4K returned error *********\n");
 		}
-//		else
-//		{
-//			// Now read some bytes to make sure it's erased
-//			// Flash erase sets bits to all hex FF
-//			// Since we have the handy read block function, use that
-//			//
-//			// This delay is some voodoo added to see why we're
-//			// reading zeroes back all the time but getting it on the
-//			// second attempt
-//			vTaskDelay(pdMS_TO_TICKS(10));
-//
-//			// put something recognizable here (DEBUG)
-//			for(int i = 0; i <= 10; i++)
-//			{
-//				FIFObytes[i] = 0xF0 + i;
-//			}
-#if 1
-		// Get our own handle to the SPI bus
-//		MYSPI = flash_open(SPI_MASTER_CLK, SPI_MASTER_CS);
-//		if (MYSPI == NULL)
-//		{
-//			Printf("\n***ERASE SECTOR MAJOR SPI ERROR: Unable to open SPI bus handle\n\n");
-//			fault_happened = 1;
-//		}
-//		else
-//		{
-#endif
 
 			if (pdFALSE == AB_read_block(SPI, (UINT32)SectorEraseAddr, (accelBufferStruct *)FIFObytes))
 			{
 				PRINTF("  Flash readback error: %x\n", SectorEraseAddr); //Fault error indication here
 				erase_status = FALSE;
 			}
-//			flash_close(MYSPI);
-
 
 			// Note that the issue could be the read rather than the write
 			// A read of all zeroes seems to be a read error while
@@ -4158,14 +3166,11 @@ static int user_erase_flash_sector(HANDLE SPI, ULONG SectorEraseAddr)
 				faultFlag = 1;
 				erase_mismatch_count = 0;
 				vTaskDelay(pdMS_TO_TICKS(10));
-//				if( rerunCount != 2)
-//				flash_close(MYSPI);
 			}
 			else
 			{
 				PRINTF(" Flash erase & verification successful\n");
 				faultFlag = 0;
-//				flash_close(MYSPI);
 				erase_confirmed = pdTRUE;
 				break;
 			} // erase 4k returned ok status
@@ -4184,8 +3189,6 @@ static int user_erase_flash_sector(HANDLE SPI, ULONG SectorEraseAddr)
 
 
 end_of_task:
-
-//	flash_close(SPI);  // See comments about SPI closing above
 
 	return erase_status;
 }
@@ -4211,18 +3214,13 @@ static int user_process_write_to_flash(accelBufferStruct *pFIFOdata, int *did_an
 	UINT8 *reg;
 	int erase_status;
 	int write_status;
-	UINT32 i2c_status;
 	UINT32 write_fail_count;
 	accelBufferStruct checkFIFO;	// copy for readback check
 	int write_index;
 	int transmit_index;
 	int retry_count;
-	int fault_happened;
-	HANDLE SPI = NULL;
 
-#if defined(__RUNTIME_CALCULATION__) && defined(XIP_CACHE_BOOT)
-	printf_with_run_time("======= writing FIFO buff to flash");
-#endif
+	HANDLE SPI = NULL;
 
 	// Our return status starts at ok until a problem occurs
 	write_status = TRUE;
@@ -4258,87 +3256,65 @@ static int user_process_write_to_flash(accelBufferStruct *pFIFOdata, int *did_an
 	//PRINTF(" Timestamp sample: %d\n", pFIFOdata->timestamp_sample); //JW: Deprecated -- can be removed
 	PRINTF("-------------------------------\n");
 
-	fault_happened = 1;
+
 	retry_count = 0;
 
 	SPI = flash_open(SPI_MASTER_CLK, SPI_MASTER_CS);
 	if (SPI == NULL)
 	{
 		PRINTF("\nNeuralert: [%s] MAJOR SPI ERROR: Unable to open SPI bus handle", __func__);
-		fault_happened = 1;
+
 	}
 
 	for(rerunCount = 0; rerunCount < AB_WRITE_MAX_ATTEMPTS; rerunCount++)
 	{
 		retry_count++;
-		// Hack to make sure our gpio pin mux mapping is ok
-		// (during development it seemed to go awry sometimes)
-//		spi_flash_config_pin();
 
-		// Get a handle to the SPI bus (should we keep the original handle?)
-//		SPI = flash_open(SPI_MASTER_CLK, SPI_MASTER_CS);
-//		if (SPI == NULL)
-//		{
-//			Printf("\n***MAJOR SPI ERROR: Unable to open SPI bus handle\n\n");
-//			fault_happened = 1;
-//		}
-//		else
+		if(!AB_write_block(SPI, NextWriteAddr, pFIFOdata))
 		{
-//			PRINTF(" user_process_write_to_flash (1): SPI handle: %x\n", SPI);
+			PRINTF("\n Neuralert: [%s] Flash Write error %x", __func__, NextWriteAddr);
+		}
+		vTaskDelay(1);
 
-			if(!AB_write_block(SPI, NextWriteAddr, pFIFOdata))
-			{
-				PRINTF("\n Neuralert: [%s] Flash Write error %x", __func__, NextWriteAddr); //Fault error indication here
-			}
-			else
-			{
-//				PRINTF("  Flash Write successful\n");
-			}
-//			vTaskDelay(1);
-#if defined(__RUNTIME_CALCULATION__) && defined(XIP_CACHE_BOOT)
-			printf_with_run_time("======= done writing FIFO to flash");
-#endif
+		// Now read it back and see if it's the same
+		if (pdFALSE == AB_read_block(SPI, NextWriteAddr, &checkFIFO))
+		{
+			PRINTF("\n Neuralert: [%s] Flash readback error: %x", __func__, NextWriteAddr);
+			write_status = FALSE;
+		}
 
-			// Now read it back and see if it's the same
-			if (pdFALSE == AB_read_block(SPI, NextWriteAddr, &checkFIFO))
-			{
-				PRINTF("  Flash readback error: %x\n", NextWriteAddr); //Fault error indication here
-				write_status = FALSE;
-			}
+		// Read back what we just wrote and make sure it took
+		// Note - as of 8/20/22, the WIFI and MQTT activity in other
+		// tasks seems to interfere with the SPI bus.  As of this
+		// writing it seems that we catch the mistake and correct it
+		// on the first retry.
+		for(int i = 0; i <= receivedFIFO.num_samples - 1; i++)
+		{
+				if((receivedFIFO.Xvalue[i] != checkFIFO.Xvalue[i])
+						|| (receivedFIFO.Yvalue[i] != checkFIFO.Yvalue[i])
+						|| (receivedFIFO.Zvalue[i] != checkFIFO.Zvalue[i]))
+				{
+					PRINTF("\n RECEIVED: %d     X: %d Y: %d Z: %d\r",
+						i, receivedFIFO.Xvalue[i], receivedFIFO.Yvalue[i], receivedFIFO.Zvalue[i]);
+					PRINTF("\n CHECK:    %d     X: %d Y: %d Z: %d\r",
+						i, checkFIFO.Xvalue[i], checkFIFO.Yvalue[i], checkFIFO.Zvalue[i]);
+					write_fail_count++;
+				}
+		} // for each sample in FIFO compare buffer
 
-			// Read back what we just wrote and make sure it took
-			// Note - as of 8/20/22, the WIFI and MQTT activity in other
-			// tasks seems to interfere with the SPI bus.  As of this
-			// writing it seems that we catch the mistake and correct it
-			// on the first retry.
-			for(int i = 0; i <= receivedFIFO.num_samples - 1; i++)
-			{
-					if((receivedFIFO.Xvalue[i] != checkFIFO.Xvalue[i])
-							|| (receivedFIFO.Yvalue[i] != checkFIFO.Yvalue[i])
-							|| (receivedFIFO.Zvalue[i] != checkFIFO.Zvalue[i]))
-					{
-						PRINTF("RECEIVED: %d     X: %d Y: %d Z: %d\r\n", i, receivedFIFO.Xvalue[i], receivedFIFO.Yvalue[i], receivedFIFO.Zvalue[i]);
-						PRINTF("CHECK:    %d     X: %d Y: %d Z: %d\r\n", i, checkFIFO.Xvalue[i], checkFIFO.Yvalue[i], checkFIFO.Zvalue[i]);
-						write_fail_count++;
-					}
-			} // for each sample in FIFO compare buffer
+		if(write_fail_count > 0)
+		{
+			PRINTF("\n Neuralert: [%s] SPI FLASH ERROR COUNT: %d", __func__, write_fail_count);
+			faultFlag = 1;
+			write_fail_count = 0;
+			vTaskDelay(pdMS_TO_TICKS(30));
+		}
+		else
+		{
+			faultFlag = 0;
+			break;
+		}
 
-			if(write_fail_count > 0)
-			{
-				PRINTF("SPI FLASH ERROR COUNT: %d\n\n", write_fail_count);
-				faultFlag = 1;
-				write_fail_count = 0;
-				vTaskDelay(pdMS_TO_TICKS(30));
-//				if( rerunCount != (AB_WRITE_MAX_ATTEMPTS-1))
-//					flash_close(SPI);
-			}
-			else
-			{
-//				PRINTF(" Flash write & verification successful\n");
-				faultFlag = 0;
-				break;
-			}
-		} // SPI handle not null
 	} // for rerunCount < max retries
 
 	if(faultFlag != 0)
@@ -4352,37 +3328,21 @@ static int user_process_write_to_flash(accelBufferStruct *pFIFOdata, int *did_an
 	// Log how many times we succeeded on each attempt count; [0] is first try, etc.
 	pUserData->write_attempt_events[retry_count-1]++;
 
-
-// Note that the SPI handle is not closed after the last attempt
-// This is done up the caller tree to allow more time per Nick
-//	PRINTF(" user_process_write_to_flash (2): SPI handle: %x\n", SPI);
-
 	// Note if we had a write failure, we should skip the following update
-
 	if(faultFlag != 0)
 	{
 		PRINTF("\n Neuralert: [%s] FIFO DATA WRITE FAILURE - SKIPPING POINTER UPDATE", __func__);
 		goto end_of_task;
 	}
 
-
-
-	//if(!update_AB_write_location(write_index)) //JW: to be deleted
 	if(!update_AB_write_location())
 	{
 		PRINTF("\n Neuralert: [%s] Unable to set AB write location", __func__);
-//			goto end_of_task;
-	}
-	else
-	{
-//		Printf(" === Writing to flash next write location updated: %d\n", write_index);
 	}
 
 	// Increament the write index -- this is only for erasing flash below,
 	// so no risk of it affecting the actual AB write location
 	write_index = ((write_index+1) % AB_FLASH_MAX_PAGES);
-
-	//	vTaskDelay(pdMS_TO_TICKS(50));
 
 	// If the next page we're going to write to is the start of a
 	// new sector, we have to erase it to be ready
@@ -4410,40 +3370,6 @@ end_of_task:
 	return write_status;
 }
 
-/**
- *******************************************************************************
- * @brief Write the current "wall clock" time to the user log in flash
- *
- *******************************************************************************
- */
-static void log_current_time(UCHAR *PrefixString)
-{
-
-__time64_t nowSec;
-struct tm *ts;
-char buf[USERLOG_STRING_MAX_LEN];
-int len;
-int timelen;
-
-	da16x_time64_sec(NULL, &nowSec);
-	ts = (struct tm *)da16x_localtime64(&nowSec);
-	da16x_strftime(buf, sizeof (buf), "%Y.%m.%d %H:%M:%S", ts);
-	timelen = strlen(buf);
-
-	len = strlen(PrefixString);
-	if ((len > 0) + (timelen + len < USERLOG_STRING_MAX_LEN))
-	{
-		PRINTF("\n Neuralert: [%s] %s Current Time : %s (GMT %+02d:%02d)",
-				__func__, PrefixString, buf,   da16x_Tzoff() / 3600,   da16x_Tzoff() % 3600);
-	}
-	else
-	{
-		PRINTF("\n Neuralert: [%s] Current Time : %s (GMT %+02d:%02d)",
-				__func__, buf,   da16x_Tzoff() / 3600,   da16x_Tzoff() % 3600);
-	}
-
-
-}
 
 /*
  * ******************************************************************************
@@ -4549,6 +3475,150 @@ unsigned int get_MQTT_stat(unsigned int *stat)
 	return out;
 }
 
+
+/*
+ * ******************************************************************************
+ * @brief clear the processList bit in a safe manner
+ *
+ * ******************************************************************************
+ */
+static void clr_process_bit(UINT32 bit)
+{
+	if(Process_semaphore != NULL )
+	{
+		/* See if we can obtain the semaphore.  If the semaphore is not
+			available wait 10 ticks to see if it becomes free. */
+		if( xSemaphoreTake( Process_semaphore, ( TickType_t ) 10 ) == pdTRUE )
+		{
+			/* We were able to obtain the semaphore and can now access the
+				shared resource. */
+
+			CLR_BIT(processLists, bit);
+			/* We have finished accessing the shared resource.  Release the
+				semaphore. */
+			xSemaphoreGive( Process_semaphore );
+		}
+		else
+		{
+			PRINTF("\n Neuralert: [%s] Unable to obtain Process semaphore", __func__);
+		}
+	}
+	else
+	{
+		PRINTF("\n Neuralert: [%s] Process semaphore not initialized", __func__);
+	}
+}
+
+
+
+/*
+ * ******************************************************************************
+ * @brief set the ProcessList bit in a safe manner
+ *
+ * ******************************************************************************
+ */
+static void set_process_bit(UINT32 bit)
+{
+	if(Process_semaphore != NULL )
+	{
+		/* See if we can obtain the semaphore.  If the semaphore is not
+			available wait 10 ticks to see if it becomes free. */
+		if( xSemaphoreTake( Process_semaphore, ( TickType_t ) 10 ) == pdTRUE )
+		{
+			/* We were able to obtain the semaphore and can now access the
+				shared resource. */
+
+			SET_BIT(processLists, bit);
+			/* We have finished accessing the shared resource.  Release the
+				semaphore. */
+			xSemaphoreGive( Process_semaphore );
+		}
+		else
+		{
+			PRINTF("\n Neuralert: [%s] Unable to obtain Process semaphore", __func__);
+		}
+	}
+	else
+	{
+		PRINTF("\n Neuralert: [%s] Process semaphore not initialized", __func__);
+	}
+}
+
+
+/*
+ * ******************************************************************************
+ * @brief determine if the ProcessList bit is set in a safe manner
+ *
+ * ******************************************************************************
+ */
+static unsigned int process_bit_set(UINT32 bit)
+{
+	if(Process_semaphore != NULL )
+	{
+		/* See if we can obtain the semaphore.  If the semaphore is not
+			available wait 10 ticks to see if it becomes free. */
+		if( xSemaphoreTake( Process_semaphore, ( TickType_t ) 10 ) == pdTRUE )
+		{
+			/* We were able to obtain the semaphore and can now access the
+				shared resource. */
+
+			unsigned int ret = BIT_SET(processLists, bit);
+			/* We have finished accessing the shared resource.  Release the
+				semaphore. */
+			xSemaphoreGive( Process_semaphore );
+
+			return ret;
+		}
+		else
+		{
+			PRINTF("\n Neuralert: [%s] Unable to obtain Process semaphore", __func__);
+		}
+	}
+	else
+	{
+		PRINTF("\n Neuralert: [%s] Process semaphore not initialized", __func__);
+	}
+
+	return 2;
+}
+
+/*
+ * ******************************************************************************
+ * @brief determine if the ProcessList is all clear (no bits active) in a safe manner
+ *
+ * ******************************************************************************
+ */
+static UINT32 get_processLists(void)
+{
+	UINT32 ret = 0;
+	if(Process_semaphore != NULL )
+	{
+		/* See if we can obtain the semaphore.  If the semaphore is not
+			available wait 10 ticks to see if it becomes free. */
+		if( xSemaphoreTake( Process_semaphore, ( TickType_t ) 10 ) == pdTRUE )
+		{
+			/* We were able to obtain the semaphore and can now access the
+				shared resource. */
+
+			ret = processLists;
+			/* We have finished accessing the shared resource.  Release the
+				semaphore. */
+			xSemaphoreGive( Process_semaphore );
+
+			return ret;
+		}
+		else
+		{
+			PRINTF("\n Neuralert: [%s] Unable to obtain Process semaphore", __func__);
+		}
+	}
+	else
+	{
+		PRINTF("\n Neuralert: [%s] Process semaphore not initialized", __func__);
+	}
+
+	return ret;
+}
 
 
 /*
@@ -4683,16 +3753,11 @@ static int user_process_read_data(void)
 	ULONG ms_since_last_read;
 	int archive_status;
 	int erase_happened;		// tells us if an erase sector has happened
-	//int mqtt_started;		// tells us if we started the mqtt task
+
 	int max_display;		// temp to figure out last active "try" position
 
 	// Make known to other processes that we are active
-	SET_BIT(processLists, USER_PROCESS_HANDLE_RTCKEY);
-
-//#if defined(__RUNTIME_CALCULATION__) && defined(XIP_CACHE_BOOT)
-//	printf_with_run_time("Read AXL data");
-//#endif
-
+	set_process_bit(USER_PROCESS_HANDLE_RTCKEY);
 
 	// Read entire FIFO contents until it is empty,
 	// filling the data structure that we store each
@@ -4700,21 +3765,9 @@ static int user_process_read_data(void)
 
 	// Read status register with FIFO content info
 	fiforeg[0] = MC36XX_REG_STATUS_1;
-	I2Cstatus = i2cRead(MC3672_ADDR, fiforeg, 1);
-
-	//TODO check I2Cstatus return value
-//	PRINTF(" FIFO status 0X%x\r\n", fiforeg[0]);
+	i2cRead(MC3672_ADDR, fiforeg, 1);
 
 	pUserData->FIFO_reads_this_power_cycle++;
-
-
-	// Only show statistics if we're in a keep-awake cycle with multiple
-	// read events
-	if (pUserData->FIFO_reads_this_power_cycle > 1)
-	{
-//		PRINTF(" AXL reads this power cycle: %d \n",
-//				pUserData->FIFO_reads_this_power_cycle);
-	}
 
 	// Note - need to make sure we don't read more than 32 here
 	// Note that even though the FIFO interrupt threshold is something
@@ -4731,13 +3784,9 @@ static int user_process_read_data(void)
 		receivedFIFO.Zvalue[dataptr] = (/*((unsigned short)rawdata[5] << 8)*/ + rawdata[4]);
 		dataptr++;
 
-//		PRINTF("%d     X: %d Y: %d Z: %d\r\n", dataptr, receivedFIFO.Xvalue[dataptr], receivedFIFO.Yvalue[dataptr], receivedFIFO.Zvalue[dataptr]);
-
 		// Reread status register with FIFO content info
 		fiforeg[0] = MC36XX_REG_STATUS_1;
-		readstatus = i2cRead(MC3672_ADDR, fiforeg, 1);
-		//TODO check I2Cstatus return value
-		//PRINTF("FIFO STAT %d: 	%d\r\n", dataptr, fiforeg[0]);
+		i2cRead(MC3672_ADDR, fiforeg, 1);
 	}
 
 	// get a timestamp
@@ -4756,9 +3805,9 @@ static int user_process_read_data(void)
 
 	ms_since_last_read = assigned_timestamp - pUserData->last_FIFO_read_time_ms;
 	pUserData->last_FIFO_read_time_ms = assigned_timestamp;
-	PRINTF(" >>Milliseconds since last AXL read: %u\n",	ms_since_last_read);
+	PRINTF("\n Neuralert: [%s] Milliseconds since last AXL read: %u", __func__, ms_since_last_read);
 
-	PRINTF(" FIFO samples read: %d\n", dataptr);
+	PRINTF("\n Neuralert: [%s] FIFO samples read: %d", __func__, dataptr);
 
 
 	// *****************************************************
@@ -4771,12 +3820,12 @@ static int user_process_read_data(void)
 	storestatus = user_process_write_to_flash(&receivedFIFO, &erase_happened);
 	if(storestatus != TRUE)
 	{
-		APRINTF_E("\n***** UNABLE TO WRITE DATA TO FLASH *****\n");
-		APRINTF_E("\n***** FAULT COUNT: %d *****\n", pUserData->write_fault_count);
+		PRINTF("\n Neuralert: [%s] UNABLE TO WRITE DATA TO FLASH", __func__);
+		PRINTF("\n Neuralert: [%s] FAULT COUNT: %d", __func__, pUserData->write_fault_count);
 	}
 	if(erase_happened)
 	{
-		PRINTF(" Erase sector happened\n");
+		PRINTF("\n Neuralert: [%s] Erase sector happened", __func__);
 	}
 
 	unsigned int temp = get_MQTT_stat(&(pUserData->ACCEL_read_count));
@@ -4883,7 +3932,7 @@ static int user_process_read_data(void)
 		increment_MQTT_stat(&(pUserData->MQTT_attempts_since_tx_success));
 
 		// Check if MQTT is still active before starting again
-		if (BIT_SET(processLists, USER_PROCESS_MQTT_TRANSMIT))
+		if (process_bit_set(USER_PROCESS_MQTT_TRANSMIT))
 		{
 			if (!check_tx_progress())
 			{
@@ -4891,7 +3940,6 @@ static int user_process_read_data(void)
 					__func__);
 				user_terminate_transmit();
 			}
-
 		}
 		else
 		{
@@ -4903,20 +3951,9 @@ static int user_process_read_data(void)
 		// Reset our transmit trigger counter
 		pUserData->ACCEL_transmit_trigger = 0;
 	}
-#ifdef CFG_USE_SYSTEM_CONTROL
-
-#endif
-
-	// Note - this is here because we had a lot of difficulty getting the
-	// SPI write to be reliable.  Hence the retry stuff.  But it was also
-	// suspected that closing the SPI bus too soon was a factor so it
-	// was moved here.
-//	flash_close(SPI);
-
 
 	// Signal that we're finished so we can sleep
-
-	CLR_BIT(processLists, USER_PROCESS_HANDLE_RTCKEY);
+	clr_process_bit(USER_PROCESS_HANDLE_RTCKEY);
 
 	return 0;
 }
@@ -4933,36 +3970,21 @@ static int user_process_read_data(void)
 void user_initialize_accelerometer(void)
 {
 
-INT32 status;
-UINT32 intr_src;
+	UINT32 intr_src;
 
-// Accelerometer initialization
-int8_t Xvalue;
-int8_t Yvalue;
-int8_t Zvalue;
+	unsigned char fiforeg[2];
+	signed char rawdata[8];
+	int i = 0;
 
-unsigned char fiforeg[2];
-signed char rawdata[8];
-int i = 0;
+	uint8_t ISR_reason;
 
-uint8_t ISR_reason;
-
-//	#if defined(__RUNTIME_CALCULATION__) && defined(XIP_CACHE_BOOT)
-//	printf_with_run_time("Start AXL init");
-//	#endif
-
-	// Accelerometer API initialization
-	// This sets the threshold at which we receive an interrupt
-//	mc3672Init((int)ACCEL_FIFO_threshold);
 	mc3672Init();
 
-	// Why this huge delay?
-	vTaskDelay(250);
+	vTaskDelay(250); // a large delay for the accelerometer to get initialized
 
 	// While loop to empty contents of FIFO before enabling RTC ISR  - NJ 6/30/2022
 	fiforeg[0] = MC36XX_REG_STATUS_1;
-	status = i2cRead(MC3672_ADDR, fiforeg, 1);
-
+	int status = i2cRead(MC3672_ADDR, fiforeg, 1);
 	while((fiforeg[0] & 16) != 16){
 		rawdata[0] = MC36XX_REG_XOUT_LSB; 	//Word Address to Write Data. 2 Bytes.
 		status = i2cRead(MC3672_ADDR, rawdata, 6);
@@ -4971,16 +3993,14 @@ uint8_t ISR_reason;
 		i++;
 	}
 	// Assign the initial timestamp.
-	// JW: We log the timestamps right after reading the buffer in
-	// the main loop, so doing it here.
 	user_time64_msec_since_poweron(&(pUserData->last_FIFO_read_time_ms));
 
-	PRINTF("\n------>FIFO buffer emptied %d samples\n", i);
+	PRINTF("\n Neuralert: [%s] FIFO buffer emptied %d samples", __func__, i);
 
 	//Enable RTC ISR - NJ 6/30/2022
 	// Note that in original SDK this interrupt was enabled earlier.
 	// See function config_ext_wakeup_resource();
-	PRINTF("\n------>%s enabling accelerometer interrupt\n", __func__); // FRSDEBUG
+	PRINTF("\n Neuralert: [%s] enabling accelerometer interrupt", __func__);
 
 	// Clear any accelerometer interrupt that might be pending
 	clear_intstate(&ISR_reason);
@@ -4990,14 +4010,10 @@ uint8_t ISR_reason;
 	intr_src |= WAKEUP_INTERRUPT_ENABLE(1);
 	RTC_IOCTL(RTC_SET_RTC_CONTROL_REG, &intr_src);
 
-	#if defined(__RUNTIME_CALCULATION__) && defined(XIP_CACHE_BOOT)
-	printf_with_run_time("End AXL init");
-	#endif
-
 	PRINTF("\n Neuralert: [%s] Accelerometer initialized", __func__);
-
-	return;
 }
+
+
 /**
  *******************************************************************************
  * @brief Process for boot-up event
@@ -5006,38 +4022,26 @@ uint8_t ISR_reason;
 static int user_process_bootup_event(void)
 {
 	int ret, netProfileUse;
-	int spi_status;
-	int status;
-	char MQTT_topic[MQTT_PASSWORD_MAX_LEN] = {0, }; // password has the max length in str type
 	int MACaddrtype = 0;
 	UCHAR time_string[20];
 
-	PRINTF("\n********** Neuralert bootup event ***********\n");
-//	PRINTF("**Neuralert: %s\n", __func__); // FRSDEBUG
+	PRINTF("\n Neuralert: [%s] bootup event", __func__);
 
-#if defined(__RUNTIME_CALCULATION__) && defined(XIP_CACHE_BOOT)
-printf_with_run_time("Starting boot event process");
-#endif
-	SET_BIT(processLists, USER_PROCESS_BOOTUP);
-	SET_BIT(processLists, USER_PROCESS_BLOCK_MQTT);
+	set_process_bit(USER_PROCESS_BOOTUP);
+	set_process_bit(USER_PROCESS_BLOCK_MQTT);
 	notify_user_LED();
-	// set_sole_system_state(USER_STATE_POWER_ON_BOOTUP); //JW: deprecated 10.14
 
-	// Do early initialization of the intermediate logging area
-	// so that any information during bootup can be captured
-	user_process_initialize_user_log_holding();
 
-// Log the earliest timestamp we know.  This was taken in main()
-// very soon after hardware initialization.  This is just to understand
-// what the RTC clock says that early in the process.
+	// Log the earliest timestamp we know.  This was taken in main()
+	// very soon after hardware initialization.  This is just to understand
+	// what the RTC clock says that early in the process.
 	time64_string (time_string, &user_raw_launch_time_msec);
 	PRINTF("\n Neuralert: [%s] Bootup event: time snapshot from main() %s ms", __func__, time_string);
 	PRINTF("\n Software part number  :    %s", USER_SOFTWARE_PART_NUMBER_STRING);
 	PRINTF("\n Software version      :    %s", USER_VERSION_STRING);
 	PRINTF("\n Software build time   : %s %s", __DATE__ , __TIME__ );
 
-	// Enable WIFI on initial bootup.  This allows us to find out if
-	// WIFI is available, if we want to.
+	// Enable WIFI on initial bootup.
 	wifi_cs_rf_cntrl(FALSE);		// RF now on
 
 	/* See if automatic network connection is disabled and do an
@@ -5046,16 +4050,14 @@ printf_with_run_time("Starting boot event process");
 	ret = da16x_get_config_int(DA16X_CONF_INT_STA_PROF_DISABLED, &netProfileUse);
 	if (ret != CC_SUCCESS || netProfileUse == pdFALSE)
 	{
-		PRINTF("\n **** NETWORK AUTO-START IS ENABLED ****\n");
+		PRINTF("\n Neuralert: [%s] NETWORK AUTO-START IS ENABLED", __func__);
 	}
 	else
 	{
-		PRINTF("\n **** NETWORK AUTO-START IS DISABLED ****\n");
-		PRINTF("     Attempting manual connection for bootup\n");
-		/* Try to make connection manually. */
-		ret = user_process_connect_ap();
+		PRINTF("\n Neuralert: [%s] NETWORK AUTO-START IS DISABLED", __func__);
+		PRINTF("\n Neuralert: [%s] Attempting manual connection for bootup", __func__);
+		ret = user_process_connect_ap(); // Try to make connection manually.
 	}
-
 
 	// The following delay serves three purposes.  It was originally added because
 	// the WIFI and MQTT startup activity seemed to interfere with
@@ -5069,27 +4071,17 @@ printf_with_run_time("Starting boot event process");
 	// a WIFI connection is available and whether we can connect to the broker.
 	// If we're unable to connect, then we should let the user know via
 	// the LEDs
-	PRINTF("\n...Delay for reset and stabilization...\n\n");
+	PRINTF("\n Neuralert [%s] Delay for reset and stabilization", __func__);
 	vTaskDelay(pdMS_TO_TICKS(10000));
-	PRINTF("\n...End stabilization delay...\n\n");
-	
-
-
+	PRINTF("\n Neuralert [%s] End stabilization delay", __func__);
 
 	// Turn off the wifi, we've already established we can connect or not.
 	wifi_cs_rf_cntrl(TRUE); // RF now off
-	//set_sole_system_state(USER_STATE_NO_DATA_COLLECTION); //JW: not doing this anymore as of 10.14
-	// NOTE: set_sole_system_state(USER_STATE_CLEAR) will be called after the first accelerometer interupt.
-
 
 
 	// Whether WIFI is connected or not, see if we can obtain our
 	// MAC address
 	// Check our MAC string used as a unique device identifier
-	// ***NOTE*** when we tried to do this earlier in the boot sequence
-	// it caused a hard fault.  It hasn't been tested when WIFI doesn't connect
-	// JW: fixed bug with strcpy and printf colliding below using vTaskDelay
-
 	memset(macstr, 0, 18);
 	memset(MACaddr, 0,7);
 	while (MACaddrtype == 0) { // we need the MACaddr -- without it, data packets will be wrong.
@@ -5102,24 +4094,25 @@ printf_with_run_time("Starting boot event process");
 	MACaddr[3] = macstr[13];
 	MACaddr[4] = macstr[15];
 	MACaddr[5] = macstr[16];
-	PRINTF(" MAC address - %s (type: %d)\n", macstr, MACaddrtype);
+	PRINTF("\n Neuralert: [%s] MAC address - %s (type: %d)", __func__, macstr, MACaddrtype);
 	vTaskDelay(10); // Delay needed here to let the print statement finish before strcpy is called next.
 
 	strcpy (pUserData->Device_ID, MACaddr);
-	PRINTF(" Unique device ID: %s\n", MACaddr);
-
+	PRINTF("\n Neuralert: [%s] Unique device ID: %s", __func__, MACaddr);
 
 	// Just in case the autoconnect got turned on, make sure it is off
 	user_process_disable_auto_connection();
 
 	// Initialize the accelerometer buffer external flash
-	user_process_initialize_AB();
-	PRINTF("\n Neuralert: [%s] Accelerometer flash buffering initialized", __func__);
+	if (user_process_initialize_AB()) {
+		PRINTF("\n Neuralert: [%s] Accelerometer flash buffering initialized", __func__);
+	} else {
+		PRINTF("\n Neuralert: [%s] Accelerometer flash buffer NOT initialized", __func__);
+		//TODO: execute reboot
+	}
 
 	pUserData->ACCEL_missed_interrupts = 0;
 	pUserData->ACCEL_transmit_trigger = MQTT_TRANSMIT_TRIGGER_FIFO_BUFFERS_FAST - MQTT_FIRST_TRANSMIT_TRIGGER_FIFO_BUFFERS;
-
-
 
 	// Initialize the FIFO interrupt cycle statistics
 	pUserData->FIFO_reads_this_power_cycle = 0;
@@ -5142,27 +4135,15 @@ printf_with_run_time("Starting boot event process");
 	pUserData->MQTT_dropped_data_events = 0;
 	pUserData->MQTT_last_message_id = 0;
 
-
-	// Complete the log initialization process, including
-	// erasing a flash sector
-	user_process_initialize_user_log();
-
 	// Initialize the accelerometer and enable the AXL interrupt
 	user_initialize_accelerometer();
-
-	// Close the SPI handle opened in AB init
-//	spi_status = flash_close(SPI);
 
 #ifdef CFG_USE_SYSTEM_CONTROL
 	// Disabling WLAN at the next boot.
 	system_control_wlan_enable(FALSE);
 #endif
 
-#if defined(__RUNTIME_CALCULATION__) && defined(XIP_CACHE_BOOT)
-printf_with_run_time("Finished boot event process");
-#endif
-
-	CLR_BIT(processLists, USER_PROCESS_BLOCK_MQTT); //stop blocking MQTT
+	clr_process_bit(USER_PROCESS_BLOCK_MQTT); //stop blocking MQTT
 
 	return ret;
 }
@@ -5238,16 +4219,12 @@ static UCHAR user_process_event(UINT32 event)
 
 	if (event & USER_SLEEP_READY_EVENT) {
 
-		PRINTF("  USER_SLEEP_READY_EVENT: processLists: 0x%x\n",processLists);
-
-#if defined(__RUNTIME_CALCULATION__) && defined(XIP_CACHE_BOOT)
-	printf_with_run_time("===USER SLEEP READY EVENT");
-#endif
-
-		if (processLists == 0) {
+		UINT32 val = get_processLists();
+		PRINTF("  USER_SLEEP_READY_EVENT: processLists: 0x%x\n", val);
+		if (val == 0) {
 
 			PRINTF("Entering sleep1. msec since last sleep %s \n\n", time_string);
-			vTaskDelay(3);
+			vTaskDelay(5);
 
 			// Get relative time since power on from the RTC time counter register
 			user_time64_msec_since_poweron(&pUserData->last_sleep_msec);
@@ -5350,13 +4327,6 @@ static void user_init(void)
 {
 	int runMode;
 	char *pResultStr = NULL;
-	UINT32 count;
-
-
-
-#if defined(__RUNTIME_CALCULATION__) && defined(XIP_CACHE_BOOT)
-	printf_with_run_time("Start user_init");
-#endif
 
 	runMode = get_run_mode();
  	pResultStr = read_nvram_string(NVR_KEY_SSID_0);
@@ -5372,20 +4342,17 @@ static void user_init(void)
 		/* Create the user retention memory and Initialize. */
 		result = user_retmmem_get(USER_RTM_DATA_TAG, (UCHAR **)&pUserData);
 		if (result == 0) {
-			PRINTF("\n**Neuralert: %s allocating retention memory\n", __func__); // FRSDEBUG
+			PRINTF("\n Neuralert: [%s] allocating retention memory\n", __func__);
 			// created a memory for the user data
 			result = user_retmmem_allocate(USER_RTM_DATA_TAG, (void**)&pUserData, sizeof(UserDataBuffer));
 			if (result == 0) {
 				memset(pUserData, 0, sizeof(UserDataBuffer));
 			} else {
-				PRINTF("\n Neuralert [%s]: Failed to allocate retention memory", __func__);
+				PRINTF("\n Neuralert: [%s] Failed to allocate retention memory", __func__);
+				user_reboot();
 			}
 		}
-		else
-		{
-//			PRINTF("\n**Neuralert: %s retention memory retrieved\n", __func__); // FRSDEBUG
-//			PRINTF("** Next MQTT message number: %d\n", pUserData->MQTT_message_number);
-		}
+
 #endif
 
 		/*
@@ -5396,10 +4363,7 @@ static void user_init(void)
 		if (AB_semaphore == NULL)
 		{
 			PRINTF("\n Neuralert: [%s] Error creating AB semaphore", __func__);
-		}
-		else
-		{
-//			PRINTF("\n****** AB semaphore created *****\n");
+			user_reboot();
 		}
 
 		/*
@@ -5410,12 +4374,8 @@ static void user_init(void)
 		if (Flash_semaphore == NULL)
 		{
 			PRINTF("\n Neuralert: [%s] Error creating Flash semaphore", __func__);
+			user_reboot();
 		}
-		else
-		{
-//			PRINTF("\n****** Flash semaphore created *****\n");
-		}
-
 
 
 		/*
@@ -5427,10 +4387,18 @@ static void user_init(void)
 		if (Stats_semaphore == NULL)
 		{
 			PRINTF("\n Neuralert: [%s] Error creating stats semaphore", __func__);
+			user_reboot();
 		}
-		else
+
+		/*
+		 * Create a semaphore to make sure each task can have exclusive access to
+		 * the processList statistics.
+		 */
+		Process_semaphore = xSemaphoreCreateMutex();
+		if (Process_semaphore == NULL)
 		{
-//			PRINTF("\n****** stats semaphore created *****\n");
+			PRINTF("\n Neuralert: [%s] Error creating process semaphore", __func__);
+			user_reboot();
 		}
 
 
@@ -5467,19 +4435,33 @@ static void user_init(void)
 			// reboot.  Also, in case of a WATCHDOG or hard fault, we want a clean reboot.  The default case below
 			// executes a software reboot (which will trigger a WAKEUP_RESET -- see above).
 			default:
-				vTaskDelay(10);
-				reboot_func(SYS_REBOOT_POR);
-
-				/* Wait for system-reboot */
-				while (1) {
-					vTaskDelay(10);
-				}
+				user_reboot();
 				break;
 
 		}
 	} else if (runMode == SYSMODE_AP_ONLY) {
 		wifi_cs_rf_cntrl(FALSE);
-		// This should never happen. If it does the system is configured wrong and we don't care what happens.
+		PRINTF("\n Neuralert [%s] system configured as an access point (wrong)", __func__);
+		user_reboot();
+	}
+}
+
+
+/**
+ ****************************************************************************************
+ * @brief perform a user called reboot
+ *        There are lots of ways this app can crash -- we've handled the biggest issues
+ *        but the real corner cases will just trigger a reboot.
+ ****************************************************************************************
+ */
+static void user_reboot(void)
+{
+	vTaskDelay(100);
+	reboot_func(SYS_REBOOT_POR);
+
+	/* Wait for system-reboot */
+	while (1) {
+		vTaskDelay(10);
 	}
 }
 
@@ -5490,20 +4472,10 @@ void tcp_client_sleep2_sample(void *param)
 	DA16X_UNUSED_ARG(param);
 
 	uint32_t ulNotifiedValue;
-	UCHAR quit = FALSE;
 	int storedRunFlag;
-	UCHAR eventreceived;  // result from event waiting
 	unsigned char fiforeg[2];
-	UINT32 i2c_status;
-// Type of MAC address returned
-//		MAC_SPOOFING,
-//		NVRAM_MAC,
-//		OTP_MAC
-	int MACaddrtype;
 	float adcDataFloat;
 	int sys_wdog_id = -1;
-
-	//sys_wdog_id = da16x_sys_watchdog_register(pdFALSE);
 
 	// MQTT callback setup
     //mqtt_client_set_msg_cb(user_mqtt_msg_cb);
@@ -5513,7 +4485,6 @@ void tcp_client_sleep2_sample(void *param)
 
 	/* Get our task handle */
 	xTask = xTaskGetCurrentTaskHandle();
-
 
 	PRINTF("\n\n===========>Starting tcp_client_sleep2_sample\r\n");
 	PRINTF(" Software part number  :    %s\n", USER_SOFTWARE_PART_NUMBER_STRING);
@@ -5540,11 +4511,12 @@ void tcp_client_sleep2_sample(void *param)
 	 */
 
 	user_get_int(DA16X_CONF_INT_RUN_FLAG, &storedRunFlag);
-	PRINTF("===========>NVRam runFlag: [%i]\r\n",storedRunFlag);
+	PRINTF("\n Neuralert: [%s] NVRam runFlag: [%i]\r",__func__, storedRunFlag);
 
 	if (storedRunFlag < 0) {
 		// This *should* be impossible, due to the additional logic for retrieving the config
-		PRINTF("Run flag set to impossible value\n");
+		PRINTF("\n Neuralert: [%s] Run flag set to impossible value");
+		user_reboot();
 	} else {
 		// We have made sure the value isn't negative, so copy it over to the global flag
 		runFlag = storedRunFlag;
@@ -5610,13 +4582,12 @@ void tcp_client_sleep2_sample(void *param)
 	 * Event loop - this is the main engine of the application
 	 */
 	PRINTF("==Event loop:[");
-	while (quit == FALSE)
+	while (1)
 	{
 		/* Block and wait for a notification.
 		 Bits in this RTOS task's notification value are set by the notifying
 		 tasks and interrupts to indicate which events have occurred. */
-		//PRINTF("%s: About to wait on event:\n", __func__);
-		eventreceived = xTaskNotifyWaitIndexed(
+		xTaskNotifyWaitIndexed(
 								0,       			/* Wait for 0th notification. */
 								0x00,               /* Don't clear any notification bits on entry. */
 								ULONG_MAX,          /* Reset the notification value to 0 on exit. */
@@ -5643,7 +4614,7 @@ void tcp_client_sleep2_sample(void *param)
 		{
 			// Timeout on event loop - check to see if the AXL is stalled
 			fiforeg[0] = MC36XX_REG_STATUS_1;
-			i2c_status = i2cRead(MC3672_ADDR, fiforeg, 1);
+			i2cRead(MC3672_ADDR, fiforeg, 1);
 			// if the AXL threshold has been reached but we didn't get the
 			// notification, fire off our own notification
 			if(fiforeg[0] & 0x40)
@@ -5671,15 +4642,5 @@ void tcp_client_sleep2_sample(void *param)
 				user_lower_AXL_poll_detect_RTC_clock = RTC_GET_COUNTER();
 			}
 		} // event wait timeout
-	} // while (quit == FALSE)
-
-	/* Un-initialize resources */
-	//user_deinit();
-
-	/* Turn off watchdog */
-	da16x_sys_watchdog_unregister(sys_wdog_id);
-
-	/* Delete task */
-	xTask = NULL;
-	vTaskDelete(NULL);
+	} // while (1)
 }
