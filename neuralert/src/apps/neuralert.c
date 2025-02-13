@@ -206,47 +206,7 @@
 // NOT per packet.
 #define MQTT_MAX_ATTEMPTS_PER_TX 3
 
-//JW: This should be deprecated now.
-// How long to wait for a WIFI connection each time the MQTT task starts up
-// Note that 10 seconds was chosen arbitrarily early in development but
-// it wasn't discovered until Release 1.8 that the caller was using milliseconds
-// instead of seconds and so it was effectively an infinite wait.
-// Observed time is about 5 seconds from the time the MQTT task starts
-//#define WIFI_CONNECT_TIMEOUT_SECONDS 30 // JW: This is being removed
 
-// How many accelerometer FIFO blocks to send each time we wake up
-// #define FIFO_BUFFERS_PER_TRANSMIT_INTERVAL 131
-
-// See the discussion in the code about transmit timing and wanting to
-// keep the total transmit task time to about 2 minutes.
-// With WIFI & cloud startup time of 10 seconds plus post-transmission
-// time waiting for response, let's gives ourselves 100 seconds
-// of actual transmit time.
-// As of 7/22/22 one JSON packet of 10 FIFO blocks was taking about 0.8 seconds
-// to transmit, so 100 seconds gives us about 125 FIFO blocks max per transmit
-// cycle.  But since there are 10 blocks per JSON packet, lets round down
-// for now
-// !!NOTE!! if this number is less than AXL trigger value for MQTT transmit,
-//  the accelerometer will eventually overrun the transmit interval
-// 120 takes about 30 seconds with 10 blocks per JSON packet transmit
-// 9/13/22 F. Strathmann set at twice the MQTT transmit trigger so
-// we can miss every other MQTT transmit interval and still be caught up
-// As of 9/13/22, we do miss an occasional MQTT connect for no reason I
-// can discern.  So this should keep us caught up if we have a WIFI connection
-// In fall 2022, Sarah at Bricksimple reported that it was "slow" to catch up
-// after missing WIFI for a while.
-// 1/10/23 analysis and discussion with Marc Ryba, decided to expand to
-// around 3 minute transmit interval in order to catch up faster.
-// Analysis shows that by transmitting about 40 minutes worth of data
-// per interval we can catch up 2 hours worth of buffered data in 15 minutes
-// and catch up completely on the next interval.  So 20 minutes intead of
-// more than an hour.
-// So 40 minutes = 8 intervals = 144 * 8 = 1152 FIFO buffers per interval
-//#define MAX_FIFO_BUFFERS_PER_TRANSMIT_INTERVAL 288
-// #define MAX_FIFO_BUFFERS_PER_TRANSMIT_INTERVAL 1152
-// JW: We want to send all the data out. So we are deprecating this term and using AB_FLASH_MAX_PAGES
-// this represents the entire buffer
-#define MAX_FIFO_BUFFERS_PER_TRANSMIT_INTERVAL AB_FLASH_MAX_PAGES
 
 // Trigger value for the accelerometer to start MQTT transmission
 //  16 ~= 1 minutes
@@ -318,19 +278,7 @@
 
 #ifdef CFG_USE_RETMEM_WITHOUT_DPM
 
-// This sets how many accelerometer interrupt cycles we will collect
-// timing for to establish the accelerometer chip sample frequency.
-// As of 9/8/22, it appears that the nominal frequency stated in the
-// chip specs can vary enough to throw off our timestamp calculation.
-// So during the first N wake-from-sleep cycles after power-on,
-// we measure the time for each FIFO buffer full and use this to
-// calculate the average period per sample.
-// This is then used by the MQTT task to calculate the timestamp
-// value for each sample transmitted.
-// This number should be less than the MQTT transmit trigger to ensure
-// that we've established the calibration information prior to
-// starting MQTT transmission
-#define AXL_CALIBRATION_CYCLES 30
+
 typedef struct
 	{
 		__time64_t timestamp;			// assigned time of interrupt
@@ -499,13 +447,6 @@ static UINT8 isAccelerometerInterrupt = pdFALSE;// pdTRUE when interrupt while a
 static UINT8 isAccelerometerTimeout = pdFALSE;	// pdTRUE when missed interrupt detected
 
 
-
-/*
- * Semaphore to coordinate between the accelerometer main task and
- * the MQTT transmit task.  This is used to provide exclusive access
- * to the AB management area so we don't accidentally overlap each other
- */
-SemaphoreHandle_t AB_semaphore = NULL;
 /*
  * Semaphore to coordinate between the accelerometer main task and
  * the MQTT transmit task with respect to accessing the flash.
@@ -564,18 +505,17 @@ static UserDataBuffer *pUserData = NULL;
 void user_start_MQTT_client();
 UINT8 system_state_bootup(void);
 static int user_process_connect_ap(void);
-//static int check_connection_status(void);
 static void user_create_MQTT_task(void);
 static void user_create_MQTT_stop_task(void);
 static int user_mqtt_send_message(void);
 void user_mqtt_connection_complete_event(void);
 static UCHAR user_process_check_wifi_conn(void);
 static int take_semaphore(SemaphoreHandle_t *);
-static int check_AB_transmit_location(int, int); // kill this
-static int clear_AB_transmit_location(int, int); // kill this
+//static int check_AB_transmit_location(int, int); // kill this
+//static int clear_AB_transmit_location(int, int); // kill this
 //static int get_AB_write_location(void); // kill this
-static int update_AB_write_location(void); // kill this
-static int AB_read_block(HANDLE SPI, UINT32 blockaddress, accelBufferStruct *FIFOdata);
+//static int update_AB_write_location(void); // kill this
+//static int AB_read_block(HANDLE SPI, UINT32 blockaddress, accelBufferStruct *FIFOdata);
 //static void clear_MQTT_stat(unsigned int *stat); // kill this
 //unsigned int get_MQTT_stat(unsigned int *stat); // kill this
 //static void increment_MQTT_stat(unsigned int *stat); // kill this
@@ -614,18 +554,9 @@ extern int get_gpio(UINT);
 extern unsigned char get_fault_count(void);
 extern void clr_fault_count();
 
-
 // SDK MQTT function to set up received messages
 //void mqtt_client_set_msg_cb(void (*user_cb)(const char *buf, int len, const char *topic));
 
-// Fred written functions to check on MQTT thread
-//extern int check_mqtt_client_thread_status(void); // JW: Deprecated - to be removed
-//extern int check_mqtt_client_state(void); // JW: Deprecated - to be removed
-
-// Fred written function in util_api.c
-// Returns elapsed time since hardware boot for adjusting
-// our interrupt time when we wake from an AXL interrupt
-//extern ULONG MS_since_boot_time(void);
 
 // When an accelerometer interrupt occurs and we're still awake,
 // the interrupt takes this snapshot of the RTC clock
@@ -1469,30 +1400,6 @@ void calculate_timestamp_for_sample(__time64_t *FIFO_ts, __time64_t *FIFO_ts_pre
 	*adjusted_timestamp = rounded_offsettime;
 }
 
-#if 0
-/**
- *******************************************************************************
- * @brief a helper function to calculate the AB buffer gap between loc and the
- * next write position.
- *
- *returns number of pages between loc and next write position
- *******************************************************************************
- */
-static int get_AB_buffer_gap(int loc)
-{
-	int write_loc;
-
-	write_loc = get_AB_write_location();
-
-	if (loc >= write_loc){
-		return loc - write_loc;
-	}
-	else{
-		return AB_FLASH_MAX_PAGES - (write_loc - loc);
-	}
-}
-#endif
-
 /**
  *******************************************************************************
  * @brief create a table of accelerometer data for transmission in one packet
@@ -1557,12 +1464,12 @@ static packetDataStruct assemble_packet_data (int start_block)
 	{
 		// calculate the buffer gap
 		unsigned int buffer_gap = 0;
-		if (take_semaphore(&AB_semaphore)) {
-			PRINTF("\n Neuralert: [%s] error taking AB semaphore", __func__);
+		if (take_semaphore(&User_semaphore)) {
+			PRINTF("\n Neuralert: [%s] error taking user semaphore", __func__);
 			// do nothing, the buffer_gap will trigger ending packet assembly
 		} else {
 			AB_INDEX_TYPE write_position = pUserData->next_AB_write_position;
-			xSemaphoreGive(AB_semaphore);
+			xSemaphoreGive(User_semaphore);
 
 			// calculate the buffer gap
 			if (blocknumber >= write_position){
@@ -1586,9 +1493,17 @@ static packetDataStruct assemble_packet_data (int start_block)
 		if ((((blocknumber + 1) % sizeof(_AB_transmit_map_t)) == 0)
 				&& (buffer_gap >= AB_TRANSMIT_SAFETY_GAP + sizeof(_AB_transmit_map_t)))
 		{
-			check_bit_flag = check_AB_transmit_location(blocknumber / sizeof(_AB_transmit_map_t), pdFALSE);
-			if (check_bit_flag == -1){
+			if (take_semaphore(&User_semaphore)) {
+				PRINTF("\n Neuralert: [%s] error taking user semaphore", __func__);
 				packet_data.nvram_error = pdTRUE;
+			} else {
+				if (pUserData->AB_transmit_map[blocknumber / sizeof(_AB_transmit_map_t)] == 0)
+				{
+					check_bit_flag = 0;
+				} else {
+					check_bit_flag = 1;
+				}
+				xSemaphoreGive(User_semaphore);
 			}
 		}
 
@@ -1602,13 +1517,16 @@ static packetDataStruct assemble_packet_data (int start_block)
 		}
 		else // check_bit_flag == 1
 		{
-			int transmit_flag = check_AB_transmit_location(blocknumber, pdTRUE);
-			if (transmit_flag == -1)
-			{
-				// there was an error in reading the transmit map
+			int transmit_flag = pdFALSE;
+			if (take_semaphore(&User_semaphore)) {
+				PRINTF("\n Neuralert: [%s] error taking user semaphore", __func__);
 				packet_data.nvram_error = pdTRUE;
+			} else {
+				transmit_flag = POS_AB_SET(pUserData->AB_transmit_map, blocknumber);
+				xSemaphoreGive(User_semaphore);
 			}
-			else if (transmit_flag == 1)
+
+			if (transmit_flag == pdTRUE)
 			{
 				// The current blocknumber is ready for transmission, Read the block from Flash
 				// For each block, assemble the XYZ data and assign a timestamp
@@ -1619,21 +1537,27 @@ static packetDataStruct assemble_packet_data (int start_block)
 				                  ((ULONG) AB_FLASH_PAGE_SIZE * (ULONG) blocknumber);
 				for (retry_count = 0; retry_count < 3; retry_count++)
 				{
-					if (!AB_read_block(SPI, blockaddr, &FIFOblock))
-					{
-						PRINTF("\n Neuralert: [%s] unable to read block %d addr: %x\n", __func__, blocknumber, blockaddr);
+					if (take_semaphore(&Flash_semaphore)) {
+						PRINTF("\n Neuralert [%s] error taking flash semaphore", __func__);
 						packet_data.flash_error = FLASH_READ_ERROR;
+					} else {
+						int spi_status = pageRead(SPI, blockaddr, (UINT8 *) &FIFOblock, sizeof(accelBufferStruct));
+						xSemaphoreGive(Flash_semaphore);
+						if(spi_status < 0){
+							PRINTF("\n Neuralert: [%s] unable to read block %d addr: %x\n", __func__, blocknumber, blockaddr);
+							packet_data.flash_error = FLASH_READ_ERROR;
+						}
 					}
 
 					if(FIFOblock.num_samples > 0)
 					{
 						break;
 					}
-
 				}
+
 				if (retry_count > 0)
 				{
-					PRINTF(" assemble_packet_data: retried read %d times", retry_count);
+					PRINTF("\n Neuralert [%s] retried read %d times", __func__, retry_count);
 				}
 
 				// Only process FIFOblock if the data is real -- otherwise, skip block and proceed.
@@ -1684,7 +1608,7 @@ static packetDataStruct assemble_packet_data (int start_block)
 	packet_data.next_start_block = blocknumber;
 	packet_data.end_block = (blocknumber + 1) % AB_FLASH_MAX_PAGES; // Since blocknumber is now the next block
 
-	PRINTF("**Assemble packet data: %d samples assembled from %d blocks\n",
+	PRINTF("Assemble packet data: %d samples assembled from %d blocks\n",
 			packet_data.num_samples, packet_data.num_blocks);
 
 	return packet_data;
@@ -2357,11 +2281,11 @@ static void user_process_send_MQTT_data(void* arg)
 	vTaskDelay(1);
 
 	// Retrieve the starting transmit block location
-	if (take_semaphore(&AB_semaphore)) {
-		PRINTF("\n Neuralert: [%s] error taking AB semaphore", __func__);
+	if (take_semaphore(&User_semaphore)) {
+		PRINTF("\n Neuralert: [%s] error taking user semaphore", __func__);
 	} else {
 		transmit_start_loc = pUserData->next_AB_write_position; // start where the NEXT write will take place
-		xSemaphoreGive(AB_semaphore);
+		xSemaphoreGive(User_semaphore);
 	}
 
 	// If there is no valid transmit position, we've been wakened by mistake
@@ -2427,7 +2351,7 @@ static void user_process_send_MQTT_data(void* arg)
 
 		if (packet_data.num_samples < 0)
 		{
-			PRINTF("\n Neuralert: [%s] MQTT transmit: error returned from assemble_packet_data - aborting", __func__);
+			PRINTF("\n Neuralert: [%s] packet data error - aborting", __func__);
 			request_stop_transmit = pdTRUE;
 		}
 		else if (packet_data.num_samples == 0)
@@ -2444,58 +2368,54 @@ static void user_process_send_MQTT_data(void* arg)
 			da16x_sys_watchdog_notify_and_resume(sys_wdog_id);
 			if(status == 0) //Tranmission successful!
 			{
-				if (take_semaphore(&User_semaphore)) {
-					PRINTF("\n Neuralert: [%s] error taking the user semaphore", __func__);
-					// do nothing, not critical since not clearing this value will just keep us in
-					// the "long" transmission interval longer.
-				} else {
-					pUserData->MQTT_attempts_since_tx_success = 0;
-					xSemaphoreGive(User_semaphore);
-				}
-
-				//we have succeeded in a transmission (bootup complete), so clear the bootup state bit.
+				//we have succeeded in a transmission (bootup complete), so clear the bootup process  bit.
 				if (take_semaphore(&Process_semaphore)) {
 					PRINTF("\n Neuralert: [%s] error taking process semaphore", __func__);
-					user_reboot();
+					// do nothing, we'll try to clear the process bit next transmission success.
 				} else {
 					CLR_BIT(processLists, USER_PROCESS_BOOTUP);
 					xSemaphoreGive(Process_semaphore);
 				}
 				notify_user_LED(); // notify the led
 
-				// Clear the transmission map corresponding to blocks in the packet
-				if (packet_data.start_block > packet_data.end_block)
-				{
-					// clear from "end" to "start" (because LIMO works backwards through the map)
-					if (!clear_AB_transmit_location(packet_data.end_block, packet_data.start_block))
-					{
-						PRINTF("\nNeuralert: [%s] MQTT transmit map failed to update", __func__);
-					}
-
-				}
-				else // there was a "wrap" in the buffer
-				{
-					// clear from "0" to "start" and from "end" to AB_MAX_FLASH_PAGES-1
-					if (!clear_AB_transmit_location(0, packet_data.start_block))
-					{
-						PRINTF("\nNeuralert: [%s] MQTT transmit map failed to update", __func__);
-					}
-					if (!clear_AB_transmit_location(packet_data.end_block, AB_FLASH_MAX_PAGES-1))
-					{
-						PRINTF("\nNeuralert: [%s] MQTT transmit map failed to update", __func__);
-					}
-				}
-
-				// Do the stats
 				if (take_semaphore(&User_semaphore)) {
 					PRINTF("\n Neuralert: [%s] error taking user semaphore", __func__);
-					// do nothing, not a critical error
+					// do nothing, if we don't clear the transmit locations then they will be resent next time.
+					// if attempts since tx success isn't updated, we'll stay in "fast" transmission mode longer
 				} else {
-					pUserData->MQTT_stats_packets_sent++;
+					// A lot of bookkeeping things are happening here. The user semaphore held longer than usual.
+					pUserData->MQTT_attempts_since_tx_success = 0; // must be protected by user semaphore
+
+					// Clear the transmission map corresponding to blocks in the packet
+					if (packet_data.start_block > packet_data.end_block)
+					{
+						// clear from "end" to "start" (because LIMO works backwards through the map)
+						for (int i=packet_data.end_block; i<=packet_data.start_block; i++)
+						{
+							CLR_AB_POS(pUserData->AB_transmit_map, i);
+						}
+					}
+					else // there was a "wrap" in the buffer
+					{
+						// clear from "0" to "start" and from "end" to AB_MAX_FLASH_PAGES-1
+						for (int i=0; i<=packet_data.start_block; i++)
+						{
+							CLR_AB_POS(pUserData->AB_transmit_map, i);
+						}
+						for (int i=packet_data.end_block; i<=AB_FLASH_MAX_PAGES-1; i++)
+						{
+							CLR_AB_POS(pUserData->AB_transmit_map, i);
+						}
+					}
+
+					// Do the stats
+					pUserData->MQTT_stats_packets_sent++; // must be protected by user semaphore
+					packets_sent++;		// Total packets sent this interval
+					samples_sent += packet_data.num_samples;
+
 					xSemaphoreGive(User_semaphore);
 				}
-				packets_sent++;		// Total packets sent this interval
-				samples_sent += packet_data.num_samples;
+
 			}
 			else if (pUserData->MQTT_tx_attempts_remaining > 0){
 				PRINTF("\n Neuralert: [%s] MQTT transmission %d:%d failed. Remaining attempts %d. Retry Transmission",
@@ -2946,327 +2866,6 @@ static int user_process_initialize_AB(void)
 #if 0
 /**
  *******************************************************************************
- * @brief Process to retrieve the accelerometer buffer management
- * next-write location, making sure it's done with exclusive access
- *  Returns -1 if unable to gain exclusive access
- *  returns the AB next write position otherwise
- *
- *******************************************************************************
- */
-static int get_AB_write_location(void)
-{
-	int return_value = -1;
-
-	if(AB_semaphore != NULL )
-	{
-		/* See if we can obtain the semaphore.  If the semaphore is not
-	        available wait 10 ticks to see if it becomes free. */
-		if( xSemaphoreTake( AB_semaphore, ( TickType_t ) 10 ) == pdTRUE )
-		{
-			/* We were able to obtain the semaphore and can now access the
-	            shared resource. */
-			return_value = pUserData->next_AB_write_position;
-
-			/* We have finished accessing the shared resource.  Release the
-	            semaphore. */
-			xSemaphoreGive( AB_semaphore );
-
-		}
-		else
-		{
-			PRINTF("\n ***Unable to obtain AB semaphore\n");
-		}
-	}
-	else
-	{
-		PRINTF("\n ***AB semaphore not initialized!\n");
-	}
-	return return_value;
-
-}
-#endif
-
-/**
- *******************************************************************************
- * @brief Process to check the accelerometer buffer management
- * transmit map location, making sure it's done with exclusive access
- *  bit_flag identifies whether to check by bit, or the AB_transmit_map type (uint32_t)
- *  Returns -1 if unable to gain exclusive access
- *  returns whether any bit in the range otherwise (0 or 1)
- *******************************************************************************
- */
-static int check_AB_transmit_location(int location, int bit_flag)
-{
-	int return_value = -1;
-	if(AB_semaphore != NULL )
-	{
-		/* See if we can obtain the semaphore.  If the semaphore is not
-			available wait 10 ticks to see if it becomes free. */
-		if( xSemaphoreTake( AB_semaphore, ( TickType_t ) 10 ) == pdTRUE )
-		{
-
-			if (bit_flag == pdTRUE){
-				// query whether the current location is set for transmission
-				if (POS_AB_SET(pUserData->AB_transmit_map, location))
-				{
-					return_value = 1;
-				}
-				else
-				{
-					return_value = 0;
-				}
-			}
-			else
-			{
-				if (pUserData->AB_transmit_map[location] == 0)
-				{
-					return_value = 0;
-				}
-				else
-				{
-					return_value = 1;
-				}
-			}
-
-
-			/* We have finished accessing the shared resource.  Release the
-				semaphore. */
-			xSemaphoreGive( AB_semaphore );
-		}
-		else
-		{
-			PRINTF("\n ***Unable to obtain AB semaphore\n");
-		}
-	}
-	else
-	{
-		PRINTF("\n ***AB semaphore not initialized!\n");
-	}
-
-	return return_value;
-}
-
-
-
-/**
- *******************************************************************************
- * @brief Process to check the accelerometer buffer management
- * transmit map location, making sure it's done with exclusive access
- *  Returns -1 if unable to gain exclusive access
- *  returns value of transmit bit otherwise (0 or 1)
- *******************************************************************************
- */
-static int clear_AB_transmit_location(int start_location, int end_location)
-{
-	int return_value = pdFALSE;
-
-	if(AB_semaphore != NULL )
-	{
-		/* See if we can obtain the semaphore.  If the semaphore is not
-			available wait 10 ticks to see if it becomes free. */
-		if( xSemaphoreTake( AB_semaphore, ( TickType_t ) 10 ) == pdTRUE )
-		{
-
-			// clear transmit map from start to end
-			for (int i=start_location; i<=end_location; i++)
-			{
-				CLR_AB_POS(pUserData->AB_transmit_map, i);
-			}
-
-			/* We have finished accessing the shared resource.  Release the
-				semaphore. */
-			xSemaphoreGive( AB_semaphore );
-			return_value = pdTRUE;
-
-		}
-		else
-		{
-			PRINTF("\n ***Unable to obtain AB semaphore\n");
-		}
-	}
-	else
-	{
-		PRINTF("\n ***AB semaphore not initialized!\n");
-	}
-
-	return return_value;
-}
-
-
-
-/**
- *******************************************************************************
- * @brief Process to update the accelerometer buffer management
- * next-write location, making sure it's done with exclusive access
- *  Returns FALSE if unable to gain exclusive access
- *  returns TRUE otherwise
- *
- *******************************************************************************
- */
-static int update_AB_write_location(void)
-{
-	int return_value = pdFALSE;
-
-	// NOTE! this doesn't check to see if the MQTT task is running or
-	// not.  It is expected that this function will be called under
-	// the following circumstances:
-	//   1. MQTT task is not running and we've just read from the AXL
-	//   2. MQTT task is running but is transmitting some data that
-	//      we recorded recently but not including what we've just
-	//      recorded
-	//   3. MQTT task is running but is transmitting old data that
-	//      we recorded a while ago.  This is likely when we lose
-	//      WIFI for a while
-	//    4. (TBD) MQTT task is transmitting data where we plan to
-	//       write or erase.  VERY IMPORTANT THAT WE DON"T LET THIS HAPPEWN
-
-	if(AB_semaphore != NULL )
-	{
-		/* See if we can obtain the semaphore.  If the semaphore is not
-			available wait 10 ticks to see if it becomes free. */
-		if( xSemaphoreTake( AB_semaphore, ( TickType_t ) 10 ) == pdTRUE )
-		{
-//			PRINTF("===update_AB_write_location: new value %d\n", new_location);
-			/* We were able to obtain the semaphore and can now access the
-				shared resource. */
-
-			// Indicate the current write position is ready for transmission
-			SET_AB_POS(pUserData->AB_transmit_map, pUserData->next_AB_write_position);
-
-			// Increment the write position
-			pUserData->next_AB_write_position = ((pUserData->next_AB_write_position + 1) % AB_FLASH_MAX_PAGES);
-
-			/* We have finished accessing the shared resource.  Release the
-				semaphore. */
-			xSemaphoreGive( AB_semaphore );
-			return_value = pdTRUE;
-
-			return return_value;
-		}
-		else
-		{
-			PRINTF("\n ***Unable to obtain AB semaphore\n");
-		}
-	}
-	else
-	{
-		PRINTF("\n ***AB semaphore not initialized!\n");
-	}
-
-	// perform a reboot because of semaphore failure
-	user_reboot();
-
-	return -1;
-
-}
-
-
-
-/**
- *******************************************************************************
- * @brief Process to retrieve one block from the accelerometer buffer
- * memory (flash)
- *  Returns pdFALSE if unable to read
- *  Returns pdTRUE and the FIFO buffer if able to read
- *******************************************************************************
- */
-static int AB_read_block(HANDLE SPI, UINT32 blockaddress, accelBufferStruct *FIFOdata)
-{
-	int return_value = pdFALSE;
-	int spi_status;
-
-	if(Flash_semaphore != NULL )
-	{
-		/* See if we can obtain the semaphore.  If the semaphore is not
-	        available wait 10 ticks to see if it becomes free. */
-		if( xSemaphoreTake( Flash_semaphore, ( TickType_t ) 10 ) == pdTRUE )
-		{
-			/* We were able to obtain the semaphore and can now access the
-	            shared resource. */
-			// Now read the block
-			spi_status = pageRead(SPI, blockaddress, (UINT8 *)FIFOdata, sizeof(accelBufferStruct));
-
-			if(spi_status < 0){
-				PRINTF("  ***** AB_read_block error reading block 0x%x\n", blockaddress);
-				return_value = pdFALSE;
-			}
-			else
-			{
-				return_value = pdTRUE;
-			}
-
-			/* We have finished accessing the shared resource.  Release the
-	            semaphore. */
-			xSemaphoreGive( Flash_semaphore );
-		}
-		else
-		{
-			PRINTF("\n ***AB_read_block: Unable to obtain Flash semaphore\n");
-		}
-	}
-	else
-	{
-		PRINTF("\n ***AB_read_block: semaphore not initialized!\n");
-	}
-
-	return return_value;
-
-}
-
-/**
- *******************************************************************************
- * @brief Process to write data to one page of the external data flash memory
- *
- *  Returns pdFALSE if unable to write
- *  Returns pdTRUE if able to write
- *******************************************************************************
- */
-static int flash_write_block(HANDLE SPI, int blockaddress, UCHAR *pagedata, int num_bytes)
-{
-	int return_value = pdFALSE;
-	int spi_status;
-
-	if(Flash_semaphore != NULL )
-	{
-		/* See if we can obtain the semaphore.  If the semaphore is not
-	        available wait 10 ticks to see if it becomes free. */
-		if( xSemaphoreTake( Flash_semaphore, ( TickType_t ) 10 ) == pdTRUE )
-		{
-			/* We were able to obtain the semaphore and can now access the
-	            shared resource. */
-			// Now write the block
-			spi_status = pageWrite(SPI, blockaddress, (UINT8 *)pagedata, num_bytes);
-			if(spi_status < 0)
-			{
-				Printf(" **flash_write_block: Flash Write error\n"); //Fault error indication here
-				return_value = pdFALSE;
-			}
-			else
-			{
-//				Printf(" **flash_write_block: Flash Write successful\n");
-				return_value = pdTRUE;
-			}
-
-			/* We have finished accessing the shared resource.  Release the
-	            semaphore. */
-			xSemaphoreGive( Flash_semaphore );
-		}
-		else
-		{
-			Printf("\n ***flash_write_block: Unable to obtain Flash semaphore\n");
-		}
-	}
-	else
-	{
-		Printf("\n ***flash_write_block: semaphore not initialized!\n");
-	}
-
-	return return_value;
-
-}
-
-/**
- *******************************************************************************
  * @brief Process to write one block to the accelerometer buffer
  * memory (flash)
  *  Returns pdFALSE if unable to write
@@ -3290,12 +2889,12 @@ static int AB_write_block(HANDLE SPI, int blockaddress, accelBufferStruct *FIFOd
 			spi_status = pageWrite(SPI, blockaddress, (UINT8 *)FIFOdata, sizeof(accelBufferStruct));
 			if(spi_status < 0)
 			{
-				PRINTF(" **AB_write_block: Flash Write error\n"); //Fault error indication here
+				PRINTF(" **: Flash Write error\n"); //Fault error indication here
 				return_value = pdFALSE;
 			}
 			else
 			{
-//				Printf(" **AB_write_block: Flash Write successful\n");
+//				Printf(" **: Flash Write successful\n");
 				return_value = pdTRUE;
 			}
 
@@ -3305,17 +2904,19 @@ static int AB_write_block(HANDLE SPI, int blockaddress, accelBufferStruct *FIFOd
 		}
 		else
 		{
-			PRINTF("\n ***AB_write_block: Unable to obtain Flash semaphore\n");
+			PRINTF("\n ***: Unable to obtain Flash semaphore\n");
 		}
 	}
 	else
 	{
-		PRINTF("\n ***AB_write_block: semaphore not initialized!\n");
+		PRINTF("\n ***: semaphore not initialized!\n");
 	}
 
 	return return_value;
 
 }
+#endif
+
 /**
  *******************************************************************************
  * @brief Process for erasing a 4k sector, with check to make sure and retry
@@ -3372,9 +2973,15 @@ static int user_erase_flash_sector(HANDLE SPI, ULONG SectorEraseAddr)
 			PRINTF("\n\n********* eraseSector_4K returned error *********\n");
 		}
 
-			if (pdFALSE == AB_read_block(SPI, (UINT32)SectorEraseAddr, (accelBufferStruct *)FIFObytes))
-			{
-				PRINTF("  Flash readback error: %x\n", SectorEraseAddr); //Fault error indication here
+		if (take_semaphore(&Flash_semaphore)) {
+			PRINTF("\n Neuralert [%s] error taking flash semaphore", __func__);
+			erase_status = FALSE;
+		} else {
+			int spi_status = pageRead(SPI, (UINT32)SectorEraseAddr,
+				(UINT8 *) (accelBufferStruct *)FIFObytes, sizeof(accelBufferStruct));
+			xSemaphoreGive(Flash_semaphore);
+			if(spi_status < 0){
+				PRINTF("\n Neuralert: [%s] Flash readback error: %x\n", __func__, SectorEraseAddr);
 				erase_status = FALSE;
 			}
 
@@ -3405,6 +3012,7 @@ static int user_erase_flash_sector(HANDLE SPI, ULONG SectorEraseAddr)
 				erase_confirmed = pdTRUE;
 				break;
 			} // erase 4k returned ok status
+		} // semaphore was obtained
 	} // for rerunCount < max retries
 
 	if(faultFlag != 0)
@@ -3441,7 +3049,7 @@ static int user_process_write_to_flash(accelBufferStruct *pFIFOdata, int *did_an
 
 	ULONG NextWriteAddr;
 	ULONG SectorEraseAddr;
-	int spi_status, rerunCount, faultFlag = 1;
+	int rerunCount, faultFlag = 1;
 	UINT8 *reg;
 	int erase_status;
 	int write_status;
@@ -3454,7 +3062,7 @@ static int user_process_write_to_flash(accelBufferStruct *pFIFOdata, int *did_an
 	HANDLE SPI = NULL;
 
 	// Our return status starts at ok until a problem occurs
-	write_status = TRUE;
+	write_status = pdTRUE;
 
 	// Set erase happened status for user in case we exit early
 	*did_an_erase = pdFALSE;
@@ -3469,12 +3077,12 @@ static int user_process_write_to_flash(accelBufferStruct *pFIFOdata, int *did_an
 	// Writes are done to 256-byte pages and so are on addresses that
 	// are multiples of 0x100
 
-	if (take_semaphore(&AB_semaphore)) {
-		PRINTF("\n Neuralert: [%s] error taking AB semaphore", __func__);
-		return FALSE;
+	if (take_semaphore(&User_semaphore)) {
+		PRINTF("\n Neuralert: [%s] error taking user semaphore", __func__);
+		return pdFALSE;
 	} else {
 		write_index = pUserData->next_AB_write_position;
-		xSemaphoreGive(AB_semaphore);
+		xSemaphoreGive(User_semaphore);
 	}
 
 	// Calculate address of next sector to write
@@ -3485,9 +3093,7 @@ static int user_process_write_to_flash(accelBufferStruct *pFIFOdata, int *did_an
 	PRINTF(" Flash Write ADDR: 0x%X\r\n", NextWriteAddr);
 	PRINTF(" Data sequence # : %d\n", pFIFOdata->data_sequence);
 	PRINTF(" Number samples  : %d\n", pFIFOdata->num_samples);
-	//PRINTF(" Timestamp sample: %d\n", pFIFOdata->timestamp_sample); //JW: Deprecated -- can be removed
 	PRINTF("-------------------------------\n");
-
 
 	retry_count = 0;
 
@@ -3502,26 +3108,36 @@ static int user_process_write_to_flash(accelBufferStruct *pFIFOdata, int *did_an
 	{
 		retry_count++;
 
-		if(!AB_write_block(SPI, NextWriteAddr, pFIFOdata))
-		{
-			PRINTF("\n Neuralert: [%s] Flash Write error %x", __func__, NextWriteAddr);
-		}
-		vTaskDelay(1);
-
-		// Now read it back and see if it's the same
-		if (pdFALSE == AB_read_block(SPI, NextWriteAddr, &checkFIFO))
-		{
-			PRINTF("\n Neuralert: [%s] Flash readback error: %x", __func__, NextWriteAddr);
+		// get the flash semaphore
+		if (take_semaphore(&Flash_semaphore)) {
+			PRINTF("\n Neuralert [%s] error taking flash semaphore", __func__);
 			write_status = FALSE;
-		}
+		} else {
+			// write to flash
+			int spi_status_write = pageWrite(SPI, NextWriteAddr, (UINT8 *) pFIFOdata, sizeof(accelBufferStruct));
+			if(spi_status_write < 0){
+				PRINTF("\n Neuralert: [%s] Flash Write error %x", __func__, NextWriteAddr);
+				write_status = FALSE;
+			}
 
-		// Read back what we just wrote and make sure it took
-		// Note - as of 8/20/22, the WIFI and MQTT activity in other
-		// tasks seems to interfere with the SPI bus.  As of this
-		// writing it seems that we catch the mistake and correct it
-		// on the first retry.
-		for(int i = 0; i <= receivedFIFO.num_samples - 1; i++)
-		{
+			vTaskDelay(3); // small delay to settle down
+
+			// Now read it back and see if it's the same
+			int spi_status_read = pageRead(SPI, NextWriteAddr, (UINT8 *) &checkFIFO, sizeof(accelBufferStruct));
+			if(spi_status_read < 0){
+				PRINTF("\n Neuralert: [%s] Flash readback error: %x", __func__, NextWriteAddr);
+				write_status = FALSE;
+			}
+
+			xSemaphoreGive(Flash_semaphore);
+
+			// Read back what we just wrote and make sure it took
+			// Note - as of 8/20/22, the WIFI and MQTT activity in other
+			// tasks seems to interfere with the SPI bus.  As of this
+			// writing it seems that we catch the mistake and correct it
+			// on the first retry.
+			for(int i = 0; i <= receivedFIFO.num_samples - 1; i++)
+			{
 				if((receivedFIFO.Xvalue[i] != checkFIFO.Xvalue[i])
 						|| (receivedFIFO.Yvalue[i] != checkFIFO.Yvalue[i])
 						|| (receivedFIFO.Zvalue[i] != checkFIFO.Zvalue[i]))
@@ -3532,21 +3148,21 @@ static int user_process_write_to_flash(accelBufferStruct *pFIFOdata, int *did_an
 						i, checkFIFO.Xvalue[i], checkFIFO.Yvalue[i], checkFIFO.Zvalue[i]);
 					write_fail_count++;
 				}
-		} // for each sample in FIFO compare buffer
+			} // for each sample in FIFO compare buffer
 
-		if(write_fail_count > 0)
-		{
-			PRINTF("\n Neuralert: [%s] SPI FLASH ERROR COUNT: %d", __func__, write_fail_count);
-			faultFlag = 1;
-			write_fail_count = 0;
-			vTaskDelay(pdMS_TO_TICKS(30));
+			if(write_fail_count > 0)
+			{
+				PRINTF("\n Neuralert: [%s] SPI FLASH ERROR COUNT: %d", __func__, write_fail_count);
+				faultFlag = 1;
+				write_fail_count = 0;
+				vTaskDelay(pdMS_TO_TICKS(30));
+			}
+			else
+			{
+				faultFlag = 0;
+				break;
+			}
 		}
-		else
-		{
-			faultFlag = 0;
-			break;
-		}
-
 	} // for rerunCount < max retries
 
 	if(faultFlag != 0)
@@ -3567,12 +3183,21 @@ static int user_process_write_to_flash(accelBufferStruct *pFIFOdata, int *did_an
 		goto end_of_task;
 	}
 
-	if(!update_AB_write_location())
-	{
-		PRINTF("\n Neuralert: [%s] Unable to set AB write location", __func__);
+	// update next write location
+	if (take_semaphore(&User_semaphore)) {
+		PRINTF("\n Neuralert: [%] error taking user semaphore", __func__);
+		// we have written data to the flash, but can't record it is there.  This could be problematic.
+		// so we're going to reboot fresh.
+		user_reboot();
+	} else {
+		// Indicate the current write position is ready for transmission
+		SET_AB_POS(pUserData->AB_transmit_map, pUserData->next_AB_write_position);
+		// Increment the write position
+		pUserData->next_AB_write_position = ((pUserData->next_AB_write_position + 1) % AB_FLASH_MAX_PAGES);
+		xSemaphoreGive(User_semaphore);
 	}
 
-	// Increament the write index -- this is only for erasing flash below,
+	// Increment the write index -- this is only for erasing flash below,
 	// so no risk of it affecting the actual AB write location
 	write_index = ((write_index+1) % AB_FLASH_MAX_PAGES);
 
@@ -3602,196 +3227,6 @@ end_of_task:
 	return write_status;
 }
 
-#if 0
-/*
- * ******************************************************************************
- * @brief clear the MQTT stats in a safe manner
- *
- * ******************************************************************************
- */
-static void clear_MQTT_stat(unsigned int *stat)
-{
-
-	if(Stats_semaphore != NULL )
-	{
-		/* See if we can obtain the semaphore.  If the semaphore is not
-			available wait 10 ticks to see if it becomes free. */
-		if( xSemaphoreTake( Stats_semaphore, ( TickType_t ) 10 ) == pdTRUE )
-		{
-			/* We were able to obtain the semaphore and can now access the
-				shared resource. */
-
-			(*stat) = 0;
-			/* We have finished accessing the shared resource.  Release the
-				semaphore. */
-			xSemaphoreGive( Stats_semaphore );
-		}
-		else
-		{
-			Printf("\n ***print stats: Unable to obtain Stats semaphore\n");
-		}
-	}
-	else
-	{
-		Printf("\n ***print stats: Stats semaphore not initialized!\n");
-	}
-}
-#endif
-
-#if 0
-/*
- * ******************************************************************************
- * @brief increment the MQTT stats in a safe manner
- *
- * ******************************************************************************
- */
-static void increment_MQTT_stat(unsigned int *stat)
-{
-
-	if(Stats_semaphore != NULL )
-	{
-		/* See if we can obtain the semaphore.  If the semaphore is not
-	        available wait 10 ticks to see if it becomes free. */
-		if( xSemaphoreTake( Stats_semaphore, ( TickType_t ) 10 ) == pdTRUE )
-		{
-			/* We were able to obtain the semaphore and can now access the
-	            shared resource. */
-
-			(*stat)++;
-			/* We have finished accessing the shared resource.  Release the
-	            semaphore. */
-			xSemaphoreGive( Stats_semaphore );
-		}
-		else
-		{
-			Printf("\n ***print stats: Unable to obtain Stats semaphore\n");
-		}
-	}
-	else
-	{
-		Printf("\n ***print stats: Stats semaphore not initialized!\n");
-	}
-}
-#endif
-
-#if 0
-/*
- * ******************************************************************************
- * @brief get the MQTT stats in a safe manner
- *
- * ******************************************************************************
- */
-unsigned int get_MQTT_stat(unsigned int *stat)
-{
-	unsigned int out = 0;
-	if(Stats_semaphore != NULL )
-	{
-		/* See if we can obtain the semaphore.  If the semaphore is not
-			available wait 10 ticks to see if it becomes free. */
-		if( xSemaphoreTake( Stats_semaphore, ( TickType_t ) 10 ) == pdTRUE )
-		{
-			/* We were able to obtain the semaphore and can now access the
-				shared resource. */
-			out = (*stat);
-			/* We have finished accessing the shared resource.  Release the
-				semaphore. */
-			xSemaphoreGive( Stats_semaphore );
-		}
-		else
-		{
-			Printf("\n ***print stats: Unable to obtain Stats semaphore\n");
-		}
-	}
-	else
-	{
-		Printf("\n ***print stats: Stats semaphore not initialized!\n");
-	}
-	return out;
-}
-#endif
-
-#if 0
-/*
- * ******************************************************************************
- * @brief determine if the ProcessList is all clear (no bits active) in a safe manner
- *
- * ******************************************************************************
- */
-static UINT32 get_processLists(void)
-{
-	UINT32 ret = 0;
-	if(Process_semaphore != NULL )
-	{
-		/* See if we can obtain the semaphore.  If the semaphore is not
-			available wait 10 ticks to see if it becomes free. */
-		if( xSemaphoreTake( Process_semaphore, ( TickType_t ) 10 ) == pdTRUE )
-		{
-			/* We were able to obtain the semaphore and can now access the
-				shared resource. */
-
-			ret = processLists;
-			/* We have finished accessing the shared resource.  Release the
-				semaphore. */
-			xSemaphoreGive( Process_semaphore );
-
-			return ret;
-		}
-		else
-		{
-			PRINTF("\n Neuralert: [%s] Unable to obtain Process semaphore", __func__);
-		}
-	}
-	else
-	{
-		PRINTF("\n Neuralert: [%s] Process semaphore not initialized", __func__);
-	}
-
-	return ret;
-}
-#endif
-
-#if 0
-/*
- * ******************************************************************************
- * @brief check whether data has been transmitted since the last time we checked
- *
- * ******************************************************************************
- */
-static int check_tx_progress(void)
-{
-	int ret = pdFALSE;
-	if(Stats_semaphore != NULL )
-	{
-		/* See if we can obtain the semaphore.  If the semaphore is not
-			available wait 10 ticks to see if it becomes free. */
-		if( xSemaphoreTake( Stats_semaphore, ( TickType_t ) 10 ) == pdTRUE )
-		{
-			/* We were able to obtain the semaphore and can now access the
-				shared resource. */
-
-			if (pUserData->MQTT_stats_packets_sent > pUserData->MQTT_stats_packets_sent_last) {
-				pUserData->MQTT_stats_packets_sent_last = pUserData->MQTT_stats_packets_sent; //
-				ret = pdTRUE;
-			}
-
-			/* We have finished accessing the shared resource.  Release the
-				semaphore. */
-			xSemaphoreGive( Stats_semaphore );
-		}
-		else
-		{
-			Printf("\n ***print stats: Unable to obtain Stats semaphore\n");
-		}
-	}
-	else
-	{
-		Printf("\n ***print stats: Stats semaphore not initialized!\n");
-	}
-
-
-	return ret;
-}
-#endif
 
 /**
  *******************************************************************************
@@ -3961,7 +3396,7 @@ static int user_process_read_data(void)
 	//    erase function failed.
 	// *****************************************************
 	storestatus = user_process_write_to_flash(&receivedFIFO, &erase_happened);
-	if(storestatus != TRUE)
+	if(storestatus != pdTRUE)
 	{
 		PRINTF("\n Neuralert: [%s] UNABLE TO WRITE DATA TO FLASH", __func__);
 		PRINTF("\n Neuralert: [%s] FAULT COUNT: %d", __func__, pUserData->write_fault_count);
@@ -4404,14 +3839,7 @@ static UCHAR user_process_event(UINT32 event)
 
 			// Get relative time since power on from the RTC time counter register
 			user_time64_msec_since_poweron(&pUserData->last_sleep_msec);
-			//			PRINTF("\n*** Milliseconds since boot now: %u\n", nowrawmsec);
 
-			// t\Turn off LEDs to save power while doing sleep/wake cycle
-			// Note the expectation is that only alerts will show
-			// during wake/sleep and then only important ones
-			//set_sole_system_state(USER_STATE_CLEAR); //JW: deprecated 10.14
-
-			//dpm_sleep_start_mode_2(TCP_CLIENT_SLP2_PERIOD, TRUE); //JW: This appears to be the way to put to sleep if using dpm -- which we aren't
 			extern void fc80211_da16x_pri_pwr_down(unsigned char retention); //JW: This is probably the correct implemenation
 			fc80211_da16x_pri_pwr_down(TRUE);
 		}
@@ -4531,16 +3959,6 @@ static void user_init(void)
 
 #endif
 
-		/*
-		 * Create a semaphore to make sure each task can have exclusive
-		 * access to the management pointers
-		 */
-		AB_semaphore = xSemaphoreCreateMutex();
-		if (AB_semaphore == NULL)
-		{
-			PRINTF("\n Neuralert: [%s] Error creating AB semaphore", __func__);
-			user_reboot();
-		}
 
 		/*
 		 * Create a semaphore to make sure each task can have exclusive
