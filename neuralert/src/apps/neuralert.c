@@ -89,6 +89,7 @@
 #define	USER_PROCESS_WATCHDOG_STOP				(1 << 6)
 #define USER_PROCESS_BLOCK_MQTT					(1 << 7)
 #define USER_PROCESS_BOOTUP						(1 << 8)
+#define USER_PROCESS_SEMAPHORE_ERROR			(1 << 9)
 
 
 
@@ -516,7 +517,7 @@ SemaphoreHandle_t Flash_semaphore = NULL;
  * Semaphore to coordinate between users of the transmission statistics.
  * This is used so we don't accidentally execute simultaneous read/writes
  */
-SemaphoreHandle_t Stats_semaphore = NULL;
+SemaphoreHandle_t User_semaphore = NULL;
 /*
  * Semaphore to coordinate between processLists between threads.
  */
@@ -575,13 +576,10 @@ static int clear_AB_transmit_location(int, int); // kill this
 static int get_AB_write_location(void); // kill this
 static int update_AB_write_location(void); // kill this
 static int AB_read_block(HANDLE SPI, UINT32 blockaddress, accelBufferStruct *FIFOdata);
-static void clear_MQTT_stat(unsigned int *stat); // kill this
-unsigned int get_MQTT_stat(unsigned int *stat); // kill this
-static void increment_MQTT_stat(unsigned int *stat); // kill this
+//static void clear_MQTT_stat(unsigned int *stat); // kill this
+//unsigned int get_MQTT_stat(unsigned int *stat); // kill this
+//static void increment_MQTT_stat(unsigned int *stat); // kill this
 static void timesync_snapshot(void);
-//static void clr_process_bit(UINT32); // kill this
-//static void set_process_bit(UINT32); // kill this
-//static unsigned int process_bit_set(UINT32); // kill this
 static void user_reboot(void);
 
 
@@ -1875,10 +1873,26 @@ void user_terminate_transmit(void)
 	// To solve the hypothesized problem above, we now read the pUserData-> -- which is more than enough time for the
 	// accelerometer task to complete and give the processor back to LmacMain to shut down before the rf is turned off.
 
-	unsigned int temp1 = get_MQTT_stat(&(pUserData->ACCEL_read_count));
+	unsigned int temp1 = 0;
+	unsigned int temp2 = 1; // must be set to a different value than temp1 for the following to be safe
+	if (take_semaphore(&User_semaphore)) {
+		PRINTF("\n Neuralert [%s] error taking user semaphore", __func__);
+		// do nothing, logic still works (temp1 != temp2)
+	} else {
+		temp1 = pUserData->ACCEL_read_count;
+		xSemaphoreGive(User_semaphore);
+	}
 	vTaskDelay(10); // This delay is NECESSARY -- DO NOT REMOVE (see description above)
 	da16x_sys_watchdog_notify(sys_wdog_id);
-	unsigned int temp2 = get_MQTT_stat(&(pUserData->ACCEL_read_count));
+
+	if (take_semaphore(&User_semaphore)) {
+		PRINTF("\n Neuralert: [%s] error taking user semaphore", __func__);
+		// do nothing, logic still works (temp1 != temp 2)
+	} else {
+		temp2 = pUserData->ACCEL_read_count;
+		xSemaphoreGive(User_semaphore);
+	}
+
 	if (temp1 != temp2) {
 		vTaskDelay(10); // This delay is also likely necessary to prevent the rare event also described above
 	}
@@ -2102,7 +2116,14 @@ static void user_process_watchdog(void* arg)
 		xSemaphoreGive(Process_semaphore);
 		if (val) {
 			PRINTF("\n WIFI and MQTT Connection Watchdog Timeout");
-			increment_MQTT_stat(&(pUserData->MQTT_stats_connect_fails));
+
+			if (take_semaphore(&User_semaphore)) {
+				PRINTF("\n Neuralert: [%s] error taking user semaphore", __func__);
+				// do nothing, not a critical error, just an accounting error
+			} else {
+				pUserData->MQTT_stats_connect_fails++;
+				xSemaphoreGive(User_semaphore);
+			}
 			da16x_sys_watchdog_notify(sys_wdog_id);
 			da16x_sys_watchdog_suspend(sys_wdog_id);
 			user_terminate_transmit();
@@ -2404,7 +2425,15 @@ static void user_process_send_MQTT_data(void* arg)
 			da16x_sys_watchdog_notify_and_resume(sys_wdog_id);
 			if(status == 0) //Tranmission successful!
 			{
-				clear_MQTT_stat(&(pUserData->MQTT_attempts_since_tx_success));
+				if (take_semaphore(&User_semaphore)) {
+					PRINTF("\n Neuralert: [%s] error taking the user semaphore", __func__);
+					// do nothing, not critical since not clearing this value will just keep us in
+					// the "long" transmission interval longer.
+				} else {
+					pUserData->MQTT_attempts_since_tx_success = 0;
+					xSemaphoreGive(User_semaphore);
+				}
+
 				//we have succeeded in a transmission (bootup complete), so clear the bootup state bit.
 				if (take_semaphore(&Process_semaphore)) {
 					PRINTF("\n Neuralert: [%s] error taking process semaphore", __func__);
@@ -2439,7 +2468,13 @@ static void user_process_send_MQTT_data(void* arg)
 				}
 
 				// Do the stats
-				increment_MQTT_stat(&(pUserData->MQTT_stats_packets_sent));
+				if (take_semaphore(&User_semaphore)) {
+					PRINTF("\n Neuralert: [%s] error taking user semaphore", __func__);
+					// do nothing, not a critical error
+				} else {
+					pUserData->MQTT_stats_packets_sent++;
+					xSemaphoreGive(User_semaphore);
+				}
 				packets_sent++;		// Total packets sent this interval
 				samples_sent += packet_data.num_samples;
 			}
@@ -2449,12 +2484,18 @@ static void user_process_send_MQTT_data(void* arg)
 				pUserData->MQTT_tx_attempts_remaining--;
 				request_stop_transmit = pdTRUE; // must set to true to exit loop
 				request_retry_transmit = pdTRUE;
-				increment_MQTT_stat(&(pUserData->MQTT_stats_retry_attempts));
+				if (take_semaphore(&User_semaphore)) {
+					PRINTF("\n Neuralert: [%s] error taking user semaphore", __func__);
+					//do nothing, not a critical error -- just local logging
+				} else {
+					pUserData->MQTT_stats_retry_attempts++;
+					xSemaphoreGive(User_semaphore);
+				}
 			}
 			else
 			{
-				PRINTF("\nNeuralert: [%s] MQTT transmission %d:%d failed. Remaining attempts %d. Ending Transmission",
-						__func__, pUserData->MQTT_message_number, msg_sequence, pUserData->MQTT_tx_attempts_remaining);
+				PRINTF("\nMQTT transmission %d:%d failed. Remaining attempts %d. Ending Transmission",
+						pUserData->MQTT_message_number, msg_sequence, pUserData->MQTT_tx_attempts_remaining);
 				request_stop_transmit = pdTRUE;
 			}
 			vTaskDelay(1);
@@ -2468,9 +2509,16 @@ static void user_process_send_MQTT_data(void* arg)
 
 	if(!request_stop_transmit)
 	{
-		increment_MQTT_stat(&(pUserData->MQTT_stats_transmit_success));
-		PRINTF("\n Neuralert: [%s] MQTT transmission %d complete.  %d samples in %d JSON packets",
-				__func__, pUserData->MQTT_message_number, samples_sent, packets_sent);
+		if (take_semaphore(&User_semaphore)) {
+			PRINTF("\n Neuralert: [%s] error taking user semaphore", __func__);
+			// do nothing, just affects local logging
+		} else {
+			pUserData->MQTT_stats_transmit_success++;
+			xSemaphoreGive(User_semaphore);
+		}
+
+		PRINTF("\n MQTT transmission %d complete.  %d samples in %d JSON packets",
+				pUserData->MQTT_message_number, samples_sent, packets_sent);
 	}
 
 
@@ -3532,7 +3580,7 @@ end_of_task:
 	return write_status;
 }
 
-
+#if 0
 /*
  * ******************************************************************************
  * @brief clear the MQTT stats in a safe manner
@@ -3566,8 +3614,9 @@ static void clear_MQTT_stat(unsigned int *stat)
 		Printf("\n ***print stats: Stats semaphore not initialized!\n");
 	}
 }
+#endif
 
-
+#if 0
 /*
  * ******************************************************************************
  * @brief increment the MQTT stats in a safe manner
@@ -3601,8 +3650,9 @@ static void increment_MQTT_stat(unsigned int *stat)
 		Printf("\n ***print stats: Stats semaphore not initialized!\n");
 	}
 }
+#endif
 
-
+#if 0
 /*
  * ******************************************************************************
  * @brief get the MQTT stats in a safe manner
@@ -3636,117 +3686,9 @@ unsigned int get_MQTT_stat(unsigned int *stat)
 	}
 	return out;
 }
-
-#if 0
-/*
- * ******************************************************************************
- * @brief clear the processList bit in a safe manner
- *
- * ******************************************************************************
- */
-static void clr_process_bit(UINT32 bit)
-{
-	if(Process_semaphore != NULL )
-	{
-		/* See if we can obtain the semaphore.  If the semaphore is not
-			available wait 10 ticks to see if it becomes free. */
-		if( xSemaphoreTake( Process_semaphore, ( TickType_t ) 10 ) == pdTRUE )
-		{
-			/* We were able to obtain the semaphore and can now access the
-				shared resource. */
-
-			CLR_BIT(processLists, bit);
-			/* We have finished accessing the shared resource.  Release the
-				semaphore. */
-			xSemaphoreGive( Process_semaphore );
-		}
-		else
-		{
-			PRINTF("\n Neuralert: [%s] Unable to obtain Process semaphore", __func__);
-		}
-	}
-	else
-	{
-		PRINTF("\n Neuralert: [%s] Process semaphore not initialized", __func__);
-	}
-}
 #endif
 
 #if 0
-/*
- * ******************************************************************************
- * @brief set the ProcessList bit in a safe manner
- *
- * ******************************************************************************
- */
-static void set_process_bit(UINT32 bit)
-{
-	if(Process_semaphore != NULL )
-	{
-		/* See if we can obtain the semaphore.  If the semaphore is not
-			available wait 10 ticks to see if it becomes free. */
-		if( xSemaphoreTake( Process_semaphore, ( TickType_t ) 10 ) == pdTRUE )
-		{
-			/* We were able to obtain the semaphore and can now access the
-				shared resource. */
-
-			SET_BIT(processLists, bit);
-			/* We have finished accessing the shared resource.  Release the
-				semaphore. */
-			xSemaphoreGive( Process_semaphore );
-		}
-		else
-		{
-			PRINTF("\n Neuralert: [%s] Unable to obtain Process semaphore", __func__);
-		}
-	}
-	else
-	{
-		PRINTF("\n Neuralert: [%s] Process semaphore not initialized", __func__);
-	}
-}
-
-#endif
-
-#if 0
-/*
- * ******************************************************************************
- * @brief determine if the ProcessList bit is set in a safe manner
- *
- * ******************************************************************************
- */
-static unsigned int process_bit_set(UINT32 bit)
-{
-	if(Process_semaphore != NULL )
-	{
-		/* See if we can obtain the semaphore.  If the semaphore is not
-			available wait 10 ticks to see if it becomes free. */
-		if( xSemaphoreTake( Process_semaphore, ( TickType_t ) 10 ) == pdTRUE )
-		{
-			/* We were able to obtain the semaphore and can now access the
-				shared resource. */
-
-			unsigned int ret = BIT_SET(processLists, bit);
-			/* We have finished accessing the shared resource.  Release the
-				semaphore. */
-			xSemaphoreGive( Process_semaphore );
-
-			return ret;
-		}
-		else
-		{
-			PRINTF("\n Neuralert: [%s] Unable to obtain Process semaphore", __func__);
-		}
-	}
-	else
-	{
-		PRINTF("\n Neuralert: [%s] Process semaphore not initialized", __func__);
-	}
-
-	return 2;
-}
-#endif
-
 /*
  * ******************************************************************************
  * @brief determine if the ProcessList is all clear (no bits active) in a safe manner
@@ -3784,8 +3726,9 @@ static UINT32 get_processLists(void)
 
 	return ret;
 }
+#endif
 
-
+#if 0
 /*
  * ******************************************************************************
  * @brief check whether data has been transmitted since the last time we checked
@@ -3826,7 +3769,7 @@ static int check_tx_progress(void)
 
 	return ret;
 }
-
+#endif
 
 /**
  *******************************************************************************
@@ -3970,17 +3913,23 @@ static int user_process_read_data(void)
 	// Set the number of data items in the buffer
 	receivedFIFO.num_samples = dataptr;
 	// Set an ever-increasing sequence number
-	increment_MQTT_stat(&(pUserData->ACCEL_read_count));  // Increment FIFO read # safely (used in other threads)
-	receivedFIFO.data_sequence = get_MQTT_stat(&(pUserData->ACCEL_read_count));
+	if (take_semaphore(&User_semaphore)) {
+		PRINTF("\n Neuralert [%s] error taking user semaphore", __func__);
+		// this error could cause a hard fault in LmacMain when shutting down transmission.
+		// solution is to reboot the system cleanly (to be overly safe).
+		user_reboot();
+	} else {
+		pUserData->ACCEL_read_count++; // also used in terminate transmission (other thread)
+		receivedFIFO.data_sequence = pUserData->ACCEL_read_count;
+		xSemaphoreGive(User_semaphore);
+	}
 	receivedFIFO.accelTime = assigned_timestamp;
 	receivedFIFO.accelTime_prev = pUserData->last_FIFO_read_time_ms;
 
 	ms_since_last_read = assigned_timestamp - pUserData->last_FIFO_read_time_ms;
 	pUserData->last_FIFO_read_time_ms = assigned_timestamp;
-	PRINTF("\n Neuralert: [%s] Milliseconds since last AXL read: %u", __func__, ms_since_last_read);
-
-	PRINTF("\n Neuralert: [%s] FIFO samples read: %d", __func__, dataptr);
-
+	PRINTF("\n Milliseconds since last AXL read: %u", ms_since_last_read);
+	PRINTF("\n FIFO samples read: %d", dataptr);
 
 	// *****************************************************
 	// Store the FIFO data structure into nonvol memory
@@ -4000,16 +3949,15 @@ static int user_process_read_data(void)
 		PRINTF("\n Neuralert: [%s] Erase sector happened", __func__);
 	}
 
-	unsigned int temp = get_MQTT_stat(&(pUserData->ACCEL_read_count));
-	PRINTF(" Total FIFO blocks read since power on   : %d\n", temp);
-	if(pUserData->write_fault_count > 0)
-	{
-		PRINTF(" Total FIFO write failures since power on: %d\n", pUserData->write_fault_count);
+	if (take_semaphore(&User_semaphore)) {
+		PRINTF("\n Neuralert [%s] error taking user semaphore", __func__);
+		// do nothing, just logging display
+	} else {
+		PRINTF(" Total FIFO blocks read since power on   : %d\n", pUserData->ACCEL_read_count);
+		xSemaphoreGive(User_semaphore);
 	}
-	if(pUserData->write_retry_count > 0)
-	{
-		PRINTF(" Total times a write retry was needed    : %d\n", pUserData->write_retry_count);
-	}
+	PRINTF(" Total FIFO write failures since power on: %d\n", pUserData->write_fault_count);
+	PRINTF(" Total times a write retry was needed    : %d\n", pUserData->write_retry_count);
 	PRINTF(" Total missed accelerometer interrupts   : %d\n", pUserData->ACCEL_missed_interrupts);
 	max_display = AB_WRITE_MAX_ATTEMPTS - 1;
 	while (max_display > 0 &&
@@ -4046,7 +3994,7 @@ static int user_process_read_data(void)
 	}
 
 	PRINTF("\n----------------------------------------\n");
-	if (take_semaphore(&Stats_semaphore)) {
+	if (take_semaphore(&User_semaphore)) {
 		PRINTF("\n Neuralert [%s] error taking stats semaphore", __func__);
 	} else {
 
@@ -4058,7 +4006,7 @@ static int user_process_read_data(void)
 		PRINTF(" Total MQTT transmit success             : %d\n", pUserData->MQTT_stats_transmit_success);
 		PRINTF(" MQTT tx attempts since tx success       : %d\n", pUserData->MQTT_attempts_since_tx_success);
 
-		xSemaphoreGive( Stats_semaphore );
+		xSemaphoreGive( User_semaphore );
 	}
 	PRINTF(" ----------------------------------------\n");
 
@@ -4068,11 +4016,19 @@ static int user_process_read_data(void)
 	++pUserData->ACCEL_transmit_trigger;  // Increment FIFO stored
 
 	// Determine the mqtt transmit trigger
-	if (pUserData->MQTT_attempts_since_tx_success <= MQTT_TRANSMIT_TRIGGER_FIFO_BUFFERS_TEST) {
-		trigger_value = MQTT_TRANSMIT_TRIGGER_FIFO_BUFFERS_FAST;
+	if (take_semaphore(&User_semaphore)) {
+		PRINTF("\n Neuralert [%s] error taking user semaphore", __func__);
+		trigger_value = MQTT_TRANSMIT_TRIGGER_FIFO_BUFFERS_FAST; // set to fast (just because)
 	} else {
-		trigger_value = MQTT_TRANSMIT_TRIGGER_FIFO_BUFFERS_SLOW;
+		// determine whether to use the fast or slow tx mode.
+		if (pUserData->MQTT_attempts_since_tx_success <= MQTT_TRANSMIT_TRIGGER_FIFO_BUFFERS_TEST) {
+			trigger_value = MQTT_TRANSMIT_TRIGGER_FIFO_BUFFERS_FAST;
+		} else {
+			trigger_value = MQTT_TRANSMIT_TRIGGER_FIFO_BUFFERS_SLOW;
+		}
+		xSemaphoreGive(User_semaphore);
 	}
+
 	PRINTF(" ACCEL transmit trigger: %d of %d\n",
 			pUserData->ACCEL_transmit_trigger, trigger_value);
 	//mqtt_started = pdFALSE;
@@ -4080,7 +4036,15 @@ static int user_process_read_data(void)
 	{
 
 		// increment MQTT attempt since tx success counter (we're going to try a transmission)
-		increment_MQTT_stat(&(pUserData->MQTT_attempts_since_tx_success));
+		if (take_semaphore(&User_semaphore)) {
+			PRINTF("\n Neuralert: [%s] error taking user semaphore", __func__);
+			// not critical to address this.  if we miss too many, then the system will delay entering the
+			// "long" transmission interval.
+		} else {
+			pUserData->MQTT_attempts_since_tx_success++;
+			xSemaphoreGive(User_semaphore);
+		}
+
 
 		// Check if MQTT is still active before starting again
 		int val = pdTRUE;
@@ -4094,14 +4058,26 @@ static int user_process_read_data(void)
 		}
 
 		if (val) {
-			if (!check_tx_progress())
-			{
+			// get number of packets sent (safely)
+			unsigned int packets_sent = pUserData->MQTT_stats_packets_sent_last; // initialize to last known value
+			if (take_semaphore(&User_semaphore)) {
+				PRINTF("\n Neuralert: [%s] error taking user semaphore", __func__);
+				// do nothing, this will trigger a transmission termination event below, which is fine.
+			} else {
+				packets_sent = pUserData->MQTT_stats_packets_sent;
+				xSemaphoreGive(User_semaphore);
+			}
+
+			if (packets_sent > pUserData->MQTT_stats_packets_sent_last) {
+				pUserData->MQTT_stats_packets_sent_last = packets_sent; //
+			} else {
 				PRINTF("\n MQTT task still active and not making progress. Stopping transmission.");
 				user_terminate_transmit();
 			}
+
 		} else {
 			// Send the event that will start the MQTT transmit task
-			increment_MQTT_stat(&(pUserData->MQTT_stats_connect_attempts));
+			pUserData->MQTT_stats_connect_attempts++;
 			user_start_data_tx();
 		}
 
@@ -4389,9 +4365,16 @@ static UCHAR user_process_event(UINT32 event)
 
 
 	if (event & USER_SLEEP_READY_EVENT) {
+		UINT32 val = 0;
+		if (take_semaphore(&Process_semaphore)) {
+			PRINTF("\n Neuralert: [%s] error taking process semaphore\n", __func__);
+			SET_BIT(val, USER_PROCESS_SEMAPHORE_ERROR); // don't let the system go to sleep
+		} else {
+			val = processLists;
+			xSemaphoreGive(Process_semaphore);
+		}
 
-		UINT32 val = get_processLists();
-		PRINTF("  USER_SLEEP_READY_EVENT: processLists: 0x%x\n", val);
+		PRINTF("USER_SLEEP_READY_EVENT: processLists: 0x%x\n", val);
 		if (val == 0) {
 
 			PRINTF("Entering sleep1. msec since last sleep %s \n\n", time_string);
@@ -4554,8 +4537,8 @@ static void user_init(void)
 		 * the MQTT transmission statistics.  These statistics are printed and logged
 		 * by the user read task and written by the mqtt transmission task
 		 */
-		Stats_semaphore = xSemaphoreCreateMutex();
-		if (Stats_semaphore == NULL)
+		User_semaphore = xSemaphoreCreateMutex();
+		if (User_semaphore == NULL)
 		{
 			PRINTF("\n Neuralert: [%s] Error creating stats semaphore", __func__);
 			user_reboot();
