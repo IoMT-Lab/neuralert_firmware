@@ -559,6 +559,7 @@ static UserDataBuffer *pUserData = NULL;
  * STATIC FUNCTIONS DEFINITIONS (forward declarations)
  *******************************************************************************
  */
+
 void user_start_MQTT_client();
 UINT8 system_state_bootup(void);
 static int user_process_connect_ap(void);
@@ -568,18 +569,19 @@ static void user_create_MQTT_stop_task(void);
 static int user_mqtt_send_message(void);
 void user_mqtt_connection_complete_event(void);
 static UCHAR user_process_check_wifi_conn(void);
-static int check_AB_transmit_location(int, int);
-static int clear_AB_transmit_location(int, int);
-static int get_AB_write_location(void);
-static int update_AB_write_location(void);
+static int take_semaphore(SemaphoreHandle_t *);
+static int check_AB_transmit_location(int, int); // kill this
+static int clear_AB_transmit_location(int, int); // kill this
+static int get_AB_write_location(void); // kill this
+static int update_AB_write_location(void); // kill this
 static int AB_read_block(HANDLE SPI, UINT32 blockaddress, accelBufferStruct *FIFOdata);
-static void clear_MQTT_stat(unsigned int *stat);
-unsigned int get_MQTT_stat(unsigned int *stat);
-static void increment_MQTT_stat(unsigned int *stat);
+static void clear_MQTT_stat(unsigned int *stat); // kill this
+unsigned int get_MQTT_stat(unsigned int *stat); // kill this
+static void increment_MQTT_stat(unsigned int *stat); // kill this
 static void timesync_snapshot(void);
-static void clr_process_bit(UINT32);
-static void set_process_bit(UINT32);
-static unsigned int process_bit_set(UINT32);
+//static void clr_process_bit(UINT32); // kill this
+//static void set_process_bit(UINT32); // kill this
+//static unsigned int process_bit_set(UINT32); // kill this
 static void user_reboot(void);
 
 
@@ -765,15 +767,20 @@ static void notify_user_LED()
 	}
 #endif//JW: deprecated 10.14
 
+	if (take_semaphore(&Process_semaphore)) {
+		PRINTF("\n Neuralert [%s] error taking process bit", __func__);
+	} else {
+		if (BIT_SET(processLists, USER_PROCESS_BOOTUP))
+		{
+			setLEDState(YELLOW, LED_SLOW, 200, 0, LED_OFFX, 0, 200); // constant yellow
+		}
+		else // No known state
+		{
+			setLEDState(BLACK, LED_OFFX, 0, 0, LED_OFFX, 0, 200);
+		}
+		xSemaphoreGive(Process_semaphore);
+	}
 
-	if (process_bit_set(USER_PROCESS_BOOTUP) == 1)
-	{
-		setLEDState(YELLOW, LED_SLOW, 200, 0, LED_OFFX, 0, 200); // constant yellow
-	}
-	else // No known state
-	{
-		setLEDState(BLACK, LED_OFFX, 0, 0, LED_OFFX, 0, 200);
-	}
 
 
 }
@@ -789,11 +796,20 @@ static void notify_user_LED()
 
 UINT8 check_mqtt_block()
 {
+	UINT8 ret = pdTRUE;
 	// check if the system state is clear
-	if (process_bit_set(USER_PROCESS_BLOCK_MQTT)) {
-		return pdTRUE;
+	if (take_semaphore(&Process_semaphore)) {
+		PRINTF("\n Neuralert [%s] error taking process semaphore", __func__); // return pdTRUE
+	} else {
+		if (BIT_SET(processLists, USER_PROCESS_BLOCK_MQTT)) {
+			ret = pdTRUE;
+		} else {
+			ret = pdFALSE;
+		}
+		xSemaphoreGive(Process_semaphore);
 	}
-	return pdFALSE;
+
+	return ret;
 }
 
 
@@ -1800,16 +1816,38 @@ void user_terminate_transmit(void)
 	sys_wdog_id = da16x_sys_watchdog_register(pdFALSE);
 
 	// Setup a new task to stop the MQTT client -- it can hang and block the wifi disconnect below
-	set_process_bit(USER_PROCESS_MQTT_STOP);
+	if (take_semaphore(&Process_semaphore)) {
+		PRINTF("\n Neuralert [%s] error taking process semaphore");
+		user_reboot();
+	} else {
+		SET_BIT(processLists, USER_PROCESS_MQTT_STOP);
+		xSemaphoreGive(Process_semaphore);
+	}
 	user_create_MQTT_stop_task();
 	int timeout = MQTT_STOP_TIMEOUT_SECONDS * 10;
-	while (process_bit_set(USER_PROCESS_MQTT_STOP) && timeout > 0)
+	da16x_sys_watchdog_notify(sys_wdog_id);
+	int val = pdTRUE;
+	while (val && timeout > 0)
 	{
+		if (take_semaphore(&Process_semaphore)) {
+			PRINTF("\n Neuralert [%s] error taking process semaphore", __func__);
+			user_reboot();
+		} else {
+			val = BIT_SET(processLists, USER_PROCESS_MQTT_STOP);
+			xSemaphoreGive(Process_semaphore);
+		}
 		vTaskDelay(pdMS_TO_TICKS(100)); // 100 ms delay
 		timeout--;
 		da16x_sys_watchdog_notify(sys_wdog_id);
 	}
-	clr_process_bit(USER_PROCESS_MQTT_STOP);
+
+	if (take_semaphore(&Process_semaphore)) {
+		PRINTF("\n Neuralert: [%s] error taking process semaphore", __func__);
+		user_reboot();
+	} else {
+		CLR_BIT(processLists, USER_PROCESS_MQTT_STOP);
+		xSemaphoreGive(Process_semaphore);
+	}
 	da16x_sys_watchdog_notify(sys_wdog_id);
 
 
@@ -1850,10 +1888,16 @@ void user_terminate_transmit(void)
 	wifi_cs_rf_cntrl(TRUE); // Might need to do this elsewhere
 
 	// Clear the transmit process bit so the system can go to sleep
-	clr_process_bit(USER_PROCESS_MQTT_TRANSMIT);
-	clr_process_bit(USER_PROCESS_MQTT_STOP);
-	clr_process_bit(USER_PROCESS_WATCHDOG);
-	clr_process_bit(USER_PROCESS_WATCHDOG_STOP);
+	if (take_semaphore(&Process_semaphore)) {
+		PRINTF("\n Neuralert [%s] error taking process semaphore", __func__);
+		user_reboot();
+	} else {
+		CLR_BIT(processLists, USER_PROCESS_MQTT_TRANSMIT);
+		CLR_BIT(processLists, USER_PROCESS_MQTT_STOP);
+		CLR_BIT(processLists, USER_PROCESS_WATCHDOG);
+		CLR_BIT(processLists, USER_PROCESS_WATCHDOG_STOP);
+		xSemaphoreGive(Process_semaphore);
+	}
 
 	da16x_sys_watchdog_unregister(sys_wdog_id);
 }
@@ -1999,7 +2043,13 @@ static void user_process_MQTT_stop(void* arg)
         mqtt_client_stop();
     }
 
-    clr_process_bit(USER_PROCESS_MQTT_STOP);
+	if (take_semaphore(&Process_semaphore)) {
+		PRINTF("\n Neuralert: [%s] error taking process semaphore", __func__);
+		user_reboot();
+	} else {
+		CLR_BIT(processLists, USER_PROCESS_MQTT_STOP);
+		xSemaphoreGive(Process_semaphore);
+	}
     vTaskDelay(1);
 
     PRINTF ("\n Neuralert: [%s] MQTT Client Stopped", __func__);
@@ -2029,26 +2079,47 @@ static void user_process_watchdog(void* arg)
 	int sys_wdog_id = da16x_sys_watchdog_register(pdFALSE);
 
 	int timeout = WATCHDOG_TIMEOUT_SECONDS * 10;
-	while (process_bit_set(USER_PROCESS_WATCHDOG) && timeout > 0)
+	int flag = pdTRUE;
+	while (flag && timeout > 0)
 	{
+		if (take_semaphore(&Process_semaphore)) {
+			PRINTF("\n Neuralert: [%s] error taking process semaphore", __func__);
+			// do nothing if this happens, the timeout is still ticking down, so it will recover
+		} else {
+			flag = BIT_SET(processLists, USER_PROCESS_WATCHDOG);
+			xSemaphoreGive(Process_semaphore);
+		}
 		vTaskDelay(pdMS_TO_TICKS(100)); // 100 ms delay
 		timeout--;
 		da16x_sys_watchdog_notify(sys_wdog_id);
 	}
 
 	// The Process bit should have been cleared in user_process_send_MQTT_data()
-	if (process_bit_set(USER_PROCESS_WATCHDOG)){
-		PRINTF ("\n Neuralert: [%s] WIFI and MQTT Connection Watchdog Timeout", __func__);
-		increment_MQTT_stat(&(pUserData->MQTT_stats_connect_fails));
+	if (take_semaphore(&Process_semaphore)) {
+		PRINTF("\n Neuralert: [%s] error taking process semaphore", __func__);
+	} else {
+		int val = BIT_SET(processLists, USER_PROCESS_WATCHDOG);
+		xSemaphoreGive(Process_semaphore);
+		if (val) {
+			PRINTF("\n WIFI and MQTT Connection Watchdog Timeout");
+			increment_MQTT_stat(&(pUserData->MQTT_stats_connect_fails));
+			da16x_sys_watchdog_notify(sys_wdog_id);
+			da16x_sys_watchdog_suspend(sys_wdog_id);
+			user_terminate_transmit();
+			da16x_sys_watchdog_notify_and_resume(sys_wdog_id);
+		}
 		da16x_sys_watchdog_notify(sys_wdog_id);
-		da16x_sys_watchdog_suspend(sys_wdog_id);
-		user_terminate_transmit();
-		da16x_sys_watchdog_notify_and_resume(sys_wdog_id);
 	}
 
 	PRINTF ("\n Neuralert: [%s] Stopping watchdog task", __func__);
-	clr_process_bit(USER_PROCESS_WATCHDOG);
-	clr_process_bit(USER_PROCESS_WATCHDOG_STOP);
+	if (take_semaphore(&Process_semaphore)) {
+		PRINTF("\n Neuralert [%s] error obtaining process semaphore", __func__);
+		user_reboot();
+	} else {
+		CLR_BIT(processLists, USER_PROCESS_WATCHDOG);
+		CLR_BIT(processLists, USER_PROCESS_WATCHDOG_STOP);
+		xSemaphoreGive(Process_semaphore);
+	}
 
 	da16x_sys_watchdog_unregister(sys_wdog_id);
 
@@ -2119,14 +2190,28 @@ void user_retry_transmit(void)
 	// First, turn off the watchdog -- we'll need to restart it in a bit.
 	// if we can't then let the hardware watchdog timeout.
 	// there should be nothing blocking this for very long
-	set_process_bit(USER_PROCESS_WATCHDOG_STOP);
-	clr_process_bit(USER_PROCESS_WATCHDOG);
+	if (take_semaphore(&Process_semaphore)) {
+		PRINTF("\n Neuralert: [%s] error taking process semaphore", __func__);
+	} else {
+		SET_BIT(processLists, USER_PROCESS_WATCHDOG_STOP);
+		CLR_BIT(processLists, USER_PROCESS_WATCHDOG);
+		xSemaphoreGive(Process_semaphore);
+	}
 	da16x_sys_watchdog_notify(sys_wdog_id);
 
 	// Wait until the watchdog is stopped (these aren't high-priority tasks,
 	// so we may need to wait a bit.
 	// If the watchdog doesn't stop, the hardware watchdog will handle a reset.
-	while (!process_bit_set(USER_PROCESS_WATCHDOG_STOP)){
+	int val = pdFALSE;
+	while (!val) {
+		int flag = take_semaphore(&Process_semaphore);
+		xSemaphoreGive(Process_semaphore);
+		if (flag) {
+			PRINTF("\n Neuralert [%s] error taking process semaphore", __func__);
+			// take no action, the watchdog will kill us eventually
+		} else {
+			val = BIT_SET(processLists, USER_PROCESS_WATCHDOG_STOP);
+		}
 		vTaskDelay(pdMS_TO_TICKS(200));
 	}
 	da16x_sys_watchdog_notify(sys_wdog_id);
@@ -2140,8 +2225,15 @@ void user_retry_transmit(void)
     da16x_sys_watchdog_notify_and_resume(sys_wdog_id);
 
 	// Set the process bits for a clean retry
-	set_process_bit(USER_PROCESS_MQTT_TRANSMIT);
-	set_process_bit(USER_PROCESS_WATCHDOG);
+	if (take_semaphore(&Process_semaphore)) {
+		PRINTF("\n Neuralert: [%s] error taking process semaphore", __func__);
+		user_reboot();
+	} else {
+		SET_BIT(processLists, USER_PROCESS_MQTT_TRANSMIT);
+		SET_BIT(processLists, USER_PROCESS_WATCHDOG);
+		xSemaphoreGive(Process_semaphore);
+	}
+
 
 	// Restart the application watchdog
 	da16x_sys_watchdog_notify(sys_wdog_id);
@@ -2195,8 +2287,13 @@ static void user_process_send_MQTT_data(void* arg)
 	// We've successfully made it to the transmission task!
 	// Clear the watchdog process bit that was monitoring for this task to start
 	// The watchdog will shutdown itself later regardless.
-	clr_process_bit(USER_PROCESS_WATCHDOG);
-	vTaskDelay(1);
+	if (take_semaphore(&Process_semaphore)) {
+		PRINTF("Neuralert: [%s] error taking process semaphore", __func__);
+		user_reboot();
+	} else {
+		CLR_BIT(processLists, USER_PROCESS_WATCHDOG);
+		xSemaphoreGive(Process_semaphore);
+	}
 
 	// Wait until MQTT is actually connected before proceeding
 	// it takes a couple of seconds from when the MQTT connected callback is called
@@ -2309,7 +2406,13 @@ static void user_process_send_MQTT_data(void* arg)
 			{
 				clear_MQTT_stat(&(pUserData->MQTT_attempts_since_tx_success));
 				//we have succeeded in a transmission (bootup complete), so clear the bootup state bit.
-				clr_process_bit(USER_PROCESS_BOOTUP);
+				if (take_semaphore(&Process_semaphore)) {
+					PRINTF("\n Neuralert: [%s] error taking process semaphore", __func__);
+					user_reboot();
+				} else {
+					CLR_BIT(processLists, USER_PROCESS_BOOTUP);
+					xSemaphoreGive(Process_semaphore);
+				}
 				notify_user_LED(); // notify the led
 
 				// Clear the transmission map corresponding to blocks in the packet
@@ -2393,8 +2496,15 @@ end_of_task:
 
 void user_process_wifi_conn()
 {
-	if (!process_bit_set(USER_PROCESS_MQTT_TRANSMIT)){
-		PRINTF("\n Neuralert: [%s] MQTT transmit task already in progress", __func__);
+	if (take_semaphore(&Process_semaphore)) {
+		PRINTF("\n Neuralert [%s] error taking process semaphore", __func__);
+		// do nothing, this is a courtesy call back for debugging
+	} else {
+		int flag = BIT_SET(processLists, USER_PROCESS_MQTT_TRANSMIT);
+		xSemaphoreGive(Process_semaphore);
+		if (!flag) {
+			PRINTF("\n MQTT transmit task already in progress", __func__);
+		}
 	}
 }
 
@@ -2447,10 +2557,19 @@ void user_start_MQTT_client()
  */
 static void user_start_data_tx(){
 
-	// Specifically, let the other tasks know that the watchdog is turning on,
-	// so we don't sleep
-	set_process_bit(USER_PROCESS_WATCHDOG);
+	// Begin by setting the process bits for the watchdog and MQTT transmission. This
+	// prevents sleeping.
+	if (take_semaphore(&Process_semaphore)) {
+		PRINTF("\n Neuralert: [%s] error taking process semaphore", __func__);
+		user_terminate_transmit();
+		return;
+	} else {
+		SET_BIT(processLists, USER_PROCESS_WATCHDOG);
+		SET_BIT(processLists, USER_PROCESS_MQTT_TRANSMIT);
+		xSemaphoreGive(Process_semaphore);
+	}
 
+	// start the software watchdog
 	int ret = 0;
 	ret = user_process_start_watchdog();
 	if (ret != 0)
@@ -2458,15 +2577,6 @@ static void user_start_data_tx(){
 		user_terminate_transmit(); // Something bad happened with the watchdog setup -- stop transmission
 		return;
 	}
-
-	// Now that the app Watchdog is in place, we can initialize what is needed for the
-	// MQTT transfer. Specifically:
-	// (i) let the other tasks know that MQTT transmit has been requested so we don't sleep
-	// (ii) reset the MQTT attempts counter for this TX cycle to zero
-	// Note, the watchdog process (above) will clear before the MQTT transmit completes,
-	// so we need both bits set to stay awake until transmission is complete
-	set_process_bit(USER_PROCESS_MQTT_TRANSMIT);
-	vTaskDelay(1);
 
 	// Initialize the maximum number of retries here -- this can't be done in
 	// user_create_MQTT_task() since that function will be called when we restart
@@ -2493,11 +2603,19 @@ static void user_start_data_tx(){
  */
 static void user_create_MQTT_stop_task()
 {
-
-	if (!process_bit_set(USER_PROCESS_MQTT_STOP)){
-		PRINTF("\n Neuralert: [%s] MQTT stop not requested", __func__);
-		return;
+	if (take_semaphore(&Process_semaphore)) {
+		PRINTF("\n Neuralert: [%s] error taking process semaphore", __func__);
+		user_reboot();
+	} else {
+		int val = BIT_SET(processLists, USER_PROCESS_MQTT_STOP);
+		xSemaphoreGive(Process_semaphore);
+		if (!val){
+			PRINTF("\n MQTT stop not requested");
+			return;
+		}
 	}
+
+
 
 	BaseType_t create_status;
 
@@ -2528,11 +2646,18 @@ static void user_create_MQTT_stop_task()
  */
 static void user_create_MQTT_task()
 {
-
-	if (!process_bit_set(USER_PROCESS_MQTT_TRANSMIT)){
-		PRINTF("\n Neuralert [%s] MQTT transmit task already in progress", __func__);
-		return;
+	if (take_semaphore(&Process_semaphore)) {
+		PRINTF("\n Neuralert: [%s] error taking process semaphore", __func__);
+		user_reboot();
+	} else {
+		int val = BIT_SET(processLists, USER_PROCESS_MQTT_TRANSMIT);
+		xSemaphoreGive(Process_semaphore);
+		if (!val){
+			PRINTF("\n MQTT transmit task already in progress", __func__);
+			return;
+		}
 	}
+
 
 	extern struct mosquitto	*mosq_sub;
 	BaseType_t create_status;
@@ -2616,6 +2741,43 @@ static int user_process_disable_auto_connection(void)
 	}
 	return ret;
 }
+
+
+
+/**
+ *******************************************************************************
+ * @brief Process for taking control of a semaphore
+ * returns:
+ *		pdTRUE if there is an error
+ *		pdFALSE otherwise
+ *******************************************************************************
+ */
+static int take_semaphore(SemaphoreHandle_t *ptr)
+{
+	int return_value = pdTRUE;
+
+	if(*ptr != NULL)
+	{
+		/* See if we can obtain the semaphore.  If the semaphore is not
+			available wait 10 ticks to see if it becomes free. */
+		if( xSemaphoreTake(*ptr, ( TickType_t ) 10 ) == pdTRUE )
+		{
+			/* We were able to obtain the semaphore and can now access the
+				shared resource. */
+			return_value = pdFALSE;
+		}
+		else
+		{
+			PRINTF("\n Neuralert [%s] unable to obtain semaphore", __func__);
+		}
+	}
+	else
+	{
+		PRINTF("\n Neuralert [%s] semaphore not initialized", __func__);
+	}
+	return return_value;
+}
+
 
 
 /**
@@ -3475,7 +3637,7 @@ unsigned int get_MQTT_stat(unsigned int *stat)
 	return out;
 }
 
-
+#if 0
 /*
  * ******************************************************************************
  * @brief clear the processList bit in a safe manner
@@ -3508,9 +3670,9 @@ static void clr_process_bit(UINT32 bit)
 		PRINTF("\n Neuralert: [%s] Process semaphore not initialized", __func__);
 	}
 }
+#endif
 
-
-
+#if 0
 /*
  * ******************************************************************************
  * @brief set the ProcessList bit in a safe manner
@@ -3544,7 +3706,9 @@ static void set_process_bit(UINT32 bit)
 	}
 }
 
+#endif
 
+#if 0
 /*
  * ******************************************************************************
  * @brief determine if the ProcessList bit is set in a safe manner
@@ -3581,6 +3745,7 @@ static unsigned int process_bit_set(UINT32 bit)
 
 	return 2;
 }
+#endif
 
 /*
  * ******************************************************************************
@@ -3757,7 +3922,14 @@ static int user_process_read_data(void)
 	int max_display;		// temp to figure out last active "try" position
 
 	// Make known to other processes that we are active
-	set_process_bit(USER_PROCESS_HANDLE_RTCKEY);
+	if (take_semaphore(&Process_semaphore)) {
+		PRINTF("\n Neuralert [%s] error taking process semaphore", __func__);
+		user_reboot();
+	} else {
+		SET_BIT(processLists, USER_PROCESS_HANDLE_RTCKEY);
+		xSemaphoreGive(Process_semaphore);
+	}
+
 
 	// Read entire FIFO contents until it is empty,
 	// filling the data structure that we store each
@@ -3873,42 +4045,21 @@ static int user_process_read_data(void)
 		}
 	}
 
-	PRINTF(" ----------------------------------------\n");
-	if(Stats_semaphore != NULL )
-	{
-		/* See if we can obtain the semaphore.  If the semaphore is not
-	        available wait 10 ticks to see if it becomes free. */
-		if( xSemaphoreTake( Stats_semaphore, ( TickType_t ) 10 ) == pdTRUE )
-		{
-			/* We were able to obtain the semaphore and can now access the
-	            shared resource. */
+	PRINTF("\n----------------------------------------\n");
+	if (take_semaphore(&Stats_semaphore)) {
+		PRINTF("\n Neuralert [%s] error taking stats semaphore", __func__);
+	} else {
 
-				PRINTF(" Total MQTT connect attempts             : %d\n", pUserData->MQTT_stats_connect_attempts);
-				PRINTF(" Total MQTT connect fails                : %d\n", pUserData->MQTT_stats_connect_fails);
-				PRINTF(" Total MQTT packets sent                 : %d\n", pUserData->MQTT_stats_packets_sent);
-				PRINTF(" Total MQTT retry attempts               : %d\n", pUserData->MQTT_stats_retry_attempts);
-				PRINTF(" Total MQTT transmit success             : %d\n", pUserData->MQTT_stats_transmit_success);
-				PRINTF(" MQTT tx attempts since tx success       : %d\n", pUserData->MQTT_attempts_since_tx_success);
-				if(pUserData->MQTT_dropped_data_events > 0)
-				{
-					PRINTF(" Total times transmit buffer wrapped     : %d\n", pUserData->MQTT_dropped_data_events);
-				}
+		/* We were able to obtain the semaphore and can now access the shared resource. */
+		PRINTF(" Total MQTT connect attempts             : %d\n", pUserData->MQTT_stats_connect_attempts);
+		PRINTF(" Total MQTT connect fails                : %d\n", pUserData->MQTT_stats_connect_fails);
+		PRINTF(" Total MQTT packets sent                 : %d\n", pUserData->MQTT_stats_packets_sent);
+		PRINTF(" Total MQTT retry attempts               : %d\n", pUserData->MQTT_stats_retry_attempts);
+		PRINTF(" Total MQTT transmit success             : %d\n", pUserData->MQTT_stats_transmit_success);
+		PRINTF(" MQTT tx attempts since tx success       : %d\n", pUserData->MQTT_attempts_since_tx_success);
 
-			/* We have finished accessing the shared resource.  Release the
-	            semaphore. */
-			xSemaphoreGive( Stats_semaphore );
-		}
-		else
-		{
-			Printf("\n ***print stats: Unable to obtain Stats semaphore\n");
-		}
+		xSemaphoreGive( Stats_semaphore );
 	}
-	else
-	{
-		Printf("\n ***print stats: Stats semaphore not initialized!\n");
-	}
-
-
 	PRINTF(" ----------------------------------------\n");
 
 
@@ -3932,28 +4083,41 @@ static int user_process_read_data(void)
 		increment_MQTT_stat(&(pUserData->MQTT_attempts_since_tx_success));
 
 		// Check if MQTT is still active before starting again
-		if (process_bit_set(USER_PROCESS_MQTT_TRANSMIT))
-		{
+		int val = pdTRUE;
+		if (take_semaphore(&Process_semaphore)) {
+			PRINTF("\n Neuralert [%s] error taking process semaphore", __func__);
+			user_reboot();
+			return 0;
+		} else {
+			val = BIT_SET(processLists, USER_PROCESS_MQTT_TRANSMIT);
+			xSemaphoreGive(Process_semaphore);
+		}
+
+		if (val) {
 			if (!check_tx_progress())
 			{
-				PRINTF("\n Neuralert: [%s] MQTT task still active and not making progress. Stopping transmission.",
-					__func__);
+				PRINTF("\n MQTT task still active and not making progress. Stopping transmission.");
 				user_terminate_transmit();
 			}
-		}
-		else
-		{
+		} else {
 			// Send the event that will start the MQTT transmit task
 			increment_MQTT_stat(&(pUserData->MQTT_stats_connect_attempts));
 			user_start_data_tx();
 		}
+
 
 		// Reset our transmit trigger counter
 		pUserData->ACCEL_transmit_trigger = 0;
 	}
 
 	// Signal that we're finished so we can sleep
-	clr_process_bit(USER_PROCESS_HANDLE_RTCKEY);
+	if (take_semaphore(&Process_semaphore)) {
+		PRINTF("\n Neuralert [%s] error taking process semaphore", __func__);
+		user_reboot();
+	} else {
+		CLR_BIT(processLists, USER_PROCESS_HANDLE_RTCKEY);
+		xSemaphoreGive(Process_semaphore);
+	}
 
 	return 0;
 }
@@ -4023,23 +4187,24 @@ static int user_process_bootup_event(void)
 {
 	int ret, netProfileUse;
 	int MACaddrtype = 0;
-	UCHAR time_string[20];
+
+	// initialize boot up process variables
+	if (take_semaphore(&Process_semaphore)) {
+		PRINTF("\n Neuralert: [%s] error taking process semaphore", __func__);
+		user_reboot();
+	} else {
+		SET_BIT(processLists, USER_PROCESS_BOOTUP);
+		SET_BIT(processLists, USER_PROCESS_BLOCK_MQTT);
+		xSemaphoreGive(Process_semaphore);
+	}
+
 
 	PRINTF("\n Neuralert: [%s] bootup event", __func__);
-
-	set_process_bit(USER_PROCESS_BOOTUP);
-	set_process_bit(USER_PROCESS_BLOCK_MQTT);
-	notify_user_LED();
-
-
-	// Log the earliest timestamp we know.  This was taken in main()
-	// very soon after hardware initialization.  This is just to understand
-	// what the RTC clock says that early in the process.
-	time64_string (time_string, &user_raw_launch_time_msec);
-	PRINTF("\n Neuralert: [%s] Bootup event: time snapshot from main() %s ms", __func__, time_string);
 	PRINTF("\n Software part number  :    %s", USER_SOFTWARE_PART_NUMBER_STRING);
 	PRINTF("\n Software version      :    %s", USER_VERSION_STRING);
 	PRINTF("\n Software build time   : %s %s", __DATE__ , __TIME__ );
+
+	notify_user_LED();
 
 	// Enable WIFI on initial bootup.
 	wifi_cs_rf_cntrl(FALSE);		// RF now on
@@ -4143,7 +4308,13 @@ static int user_process_bootup_event(void)
 	system_control_wlan_enable(FALSE);
 #endif
 
-	clr_process_bit(USER_PROCESS_BLOCK_MQTT); //stop blocking MQTT
+	if (take_semaphore(&Process_semaphore)) {
+		PRINTF("\n Neuralert [%s] error taking process semaphore", __func__);
+		user_reboot();
+	} else {
+		CLR_BIT(processLists, USER_PROCESS_BLOCK_MQTT);
+		xSemaphoreGive(Process_semaphore);
+	}
 
 	return ret;
 }
@@ -4593,7 +4764,8 @@ void tcp_client_sleep2_sample(void *param)
 								ULONG_MAX,          /* Reset the notification value to 0 on exit. */
 								&ulNotifiedValue,   /* Notified value pass out in ulNotifiedValue. */
 //								pdMS_TO_TICKS(250));   /* Timeout if no event to check on AXL. */
-								pdMS_TO_TICKS(25));   /* Timeout if no event to check on AXL. */ //RTOS must check at half the sampling rate of accelerometer
+//								pdMS_TO_TICKS(25));   /* Timeout if no event to check on AXL. */ //RTOS must check at half the sampling rate of accelerometer
+								pdMS_TO_TICKS(50));   /* Timeout if no event to check on AXL. */ //RTOS must check at half the sampling rate of accelerometer
 //								portMAX_DELAY);     /* Block indefinitely. */
 
 		//PRINTF("%s: NotifiedValue: 0x%X\n", __func__, ulNotifiedValue);
