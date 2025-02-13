@@ -514,7 +514,7 @@ SemaphoreHandle_t AB_semaphore = NULL;
  */
 SemaphoreHandle_t Flash_semaphore = NULL;
 /*
- * Semaphore to coordinate between users of the transmission statistics.
+ * Semaphore to coordinate user data in NVRAM.
  * This is used so we don't accidentally execute simultaneous read/writes
  */
 SemaphoreHandle_t User_semaphore = NULL;
@@ -573,7 +573,7 @@ static UCHAR user_process_check_wifi_conn(void);
 static int take_semaphore(SemaphoreHandle_t *);
 static int check_AB_transmit_location(int, int); // kill this
 static int clear_AB_transmit_location(int, int); // kill this
-static int get_AB_write_location(void); // kill this
+//static int get_AB_write_location(void); // kill this
 static int update_AB_write_location(void); // kill this
 static int AB_read_block(HANDLE SPI, UINT32 blockaddress, accelBufferStruct *FIFOdata);
 //static void clear_MQTT_stat(unsigned int *stat); // kill this
@@ -1469,7 +1469,7 @@ void calculate_timestamp_for_sample(__time64_t *FIFO_ts, __time64_t *FIFO_ts_pre
 	*adjusted_timestamp = rounded_offsettime;
 }
 
-
+#if 0
 /**
  *******************************************************************************
  * @brief a helper function to calculate the AB buffer gap between loc and the
@@ -1491,7 +1491,7 @@ static int get_AB_buffer_gap(int loc)
 		return AB_FLASH_MAX_PAGES - (write_loc - loc);
 	}
 }
-
+#endif
 
 /**
  *******************************************************************************
@@ -1555,8 +1555,24 @@ static packetDataStruct assemble_packet_data (int start_block)
 	int check_bit_flag = 1; // always start with the check_bit_flag set to 1
 	while (!done)
 	{
-		// Check if the next write is too close for comfort
-		unsigned int buffer_gap = (unsigned int) get_AB_buffer_gap(blocknumber);
+		// calculate the buffer gap
+		unsigned int buffer_gap = 0;
+		if (take_semaphore(&AB_semaphore)) {
+			PRINTF("\n Neuralert: [%s] error taking AB semaphore", __func__);
+			// do nothing, the buffer_gap will trigger ending packet assembly
+		} else {
+			AB_INDEX_TYPE write_position = pUserData->next_AB_write_position;
+			xSemaphoreGive(AB_semaphore);
+
+			// calculate the buffer gap
+			if (blocknumber >= write_position){
+				buffer_gap = blocknumber - write_position;
+			} else {
+				buffer_gap = AB_FLASH_MAX_PAGES - (write_position - blocknumber);
+			}
+		}
+
+		// check if the buffer gap is too close for comfort
 		if (buffer_gap <= AB_TRANSMIT_SAFETY_GAP){
 			packet_data.done_flag = pdTRUE;
 			done = pdTRUE;
@@ -2289,7 +2305,7 @@ static void user_process_send_MQTT_data(void* arg)
 
 	int send_start_addr;
 	int msg_sequence;
-	int transmit_start_loc;
+	int transmit_start_loc = INVALID_AB_ADDRESS;
 	int request_stop_transmit = pdFALSE;		// loop control for packet transmit loop
 	int request_retry_transmit = pdFALSE;
 	int transmit_complete = pdFALSE;
@@ -2337,12 +2353,16 @@ static void user_process_send_MQTT_data(void* arg)
 	// Mark our start time
 	user_time64_msec_since_poweron(&user_MQTT_start_msec);
 	time64_string(elapsed_sec_string, &user_MQTT_start_msec);
-	PRINTF("\n Neuralert: [%s] MQTT start milliseconds %s\n\n", __func__, elapsed_sec_string);
+	PRINTF("\n MQTT start milliseconds %s\n", __func__, elapsed_sec_string);
 	vTaskDelay(1);
 
-
 	// Retrieve the starting transmit block location
-	transmit_start_loc = get_AB_write_location(); // start where the NEXT write will take place
+	if (take_semaphore(&AB_semaphore)) {
+		PRINTF("\n Neuralert: [%s] error taking AB semaphore", __func__);
+	} else {
+		transmit_start_loc = pUserData->next_AB_write_position; // start where the NEXT write will take place
+		xSemaphoreGive(AB_semaphore);
+	}
 
 	// If there is no valid transmit position, we've been wakened by mistake
 	// or something else has gone wrong
@@ -2354,17 +2374,16 @@ static void user_process_send_MQTT_data(void* arg)
 		goto end_of_task;
 	}
 
-	// Adjust transmit_start_loc to account for get_AB_write_location()
+	// Adjust transmit_start_loc to account for pUserData->next_AB_write_position
 	// which provides the NEXT write, not previously written
 	transmit_start_loc = transmit_start_loc - 1;
 	if (transmit_start_loc < 0)
 	{
-		// AXL just wrapped around so our last position is the last
-		// place in memory.
+		// AXL just wrapped around so our last position is the last place in memory.
 		transmit_start_loc += AB_FLASH_MAX_PAGES;
 	}
 
-	PRINTF("\n Neuralert: [%s] MQTT transmit starting at %d", __func__, transmit_start_loc);
+	PRINTF("\n MQTT transmit starting at %d", __func__, transmit_start_loc);
 
 	// *****************************************************************
 	//  MQTT transmission
@@ -2924,6 +2943,7 @@ static int user_process_initialize_AB(void)
 
 }
 
+#if 0
 /**
  *******************************************************************************
  * @brief Process to retrieve the accelerometer buffer management
@@ -2964,6 +2984,7 @@ static int get_AB_write_location(void)
 	return return_value;
 
 }
+#endif
 
 /**
  *******************************************************************************
@@ -3447,13 +3468,14 @@ static int user_process_write_to_flash(accelBufferStruct *pFIFOdata, int *did_an
 	// write location
 	// Writes are done to 256-byte pages and so are on addresses that
 	// are multiples of 0x100
-	write_index = get_AB_write_location();
-	if (write_index < 0)
-	{
-		PRINTF("\n Neuralert [%s] Unable to get AB write location", __func__);
+
+	if (take_semaphore(&AB_semaphore)) {
+		PRINTF("\n Neuralert: [%s] error taking AB semaphore", __func__);
 		return FALSE;
+	} else {
+		write_index = pUserData->next_AB_write_position;
+		xSemaphoreGive(AB_semaphore);
 	}
-//	Printf("==Next AB store location: %d\n", write_index);
 
 	// Calculate address of next sector to write
 	NextWriteAddr = (ULONG)AB_FLASH_BEGIN_ADDRESS +
