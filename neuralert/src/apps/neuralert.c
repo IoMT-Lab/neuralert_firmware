@@ -61,10 +61,13 @@
 
 #include "user_version.h"
 
-/*
+/**
+ ********************************************************************************
  * MACROS AND DEFINITIONS
  *******************************************************************************
  */
+
+/* Bit operators */
 #define SET_BIT(src, bit)				(src |= bit)
 #define CLR_BIT(src, bit)				(src &= (~bit))
 #define BIT_SET(src, bit)				((src & bit) == bit)
@@ -91,46 +94,13 @@
 #define USER_PROCESS_BOOTUP						(1 << 8)
 #define USER_PROCESS_SEMAPHORE_ERROR			(1 << 9)
 
-
-
-
-/* USER RTC Timer */
-//#define USER_DATA_TX_TIMER_SEC					(5 * 60)	// 5 Mins
-//#define USER_DATA_TX_TIMER_SEC					(3 * 60)	// 3 Mins
-#define USER_DATA_TX_TIMER_SEC					(90)	// 1.5 Mins
-#define USER_RTC_TIMER_NAME						"uTimer"
-#define USER_RTC_TIMER_ID						(5)
-#define USER_RTC_TIMER_ID_MIN					(5)
-
-
-/* TCP Server Information */
-#define TCP_CLIENT_SLP2_PERIOD					((USER_DATA_TX_TIMER_SEC + 60) * 1000000)  // USER_DATA_TX_TIMER_SEC + 1 min
-
-/* NVRAM Items */
-#define SERVER_IP_NAME							"SERVER_IP"
-#define SERVER_PORT_NAME						"SERVER_PORT"
-
-
 /* Retention Memory */
 #define USER_RTM_DATA_TAG						"uRtmData"
-//#define USER_RTM_DATA_LEN						sizeof(accelBufferStruct)
-// Retention memory is 48KB, so if the accel buffer structure is about 120 bytes,
-// we can hold 256 buffers in about 30k.  So this is about 7,680 samples @14Hz,
-// so we have about 548 seconds = 9.1 minutes of data
-// ** NOTE setting this to 256 resulted in a hardware fault, presumably
-//         because we exceeded available memory. 
-//#define USER_RTM_DATA_MAX_CNT					(256) // buffer size that can be stored for 2 mins.
-
-
-#define USER_RTM_DATA_MAX_CNT					(54) // buffer size that can be stored for 2 mins.
-//#define USER_RTM_DATA_SIZE						(USER_RTM_DATA_LEN * USER_RTM_DATA_MAX_CNT)
-#define USER_CONNECT_STATUS_REPLY_SIZE			(512)
 
 
 /*
  * Accelerometer buffer (AB) setup
  */
-
 // # of times the write function will attempt the write/verify cycle
 // This includes the first try and subsequent retries
 #define AB_WRITE_MAX_ATTEMPTS 4
@@ -1856,37 +1826,6 @@ void user_terminate_transmit(void)
 	da16x_sys_watchdog_unregister(sys_wdog_id);
 }
 
-
-
-/**
- *******************************************************************************
- * @brief Process to check wifi connection status.
- *******************************************************************************
- */
-static UCHAR user_process_check_wifi_conn(void)
-{
-	char *status;
-	UCHAR result = pdFALSE;  // should say pdFALSE (just sayin...)
-
-//	PRINTF("**Neuralert: %s\n", __func__); // FRSDEBUG
-
-	status = (char *)pvPortMalloc(USER_CONNECT_STATUS_REPLY_SIZE);
-	if (status == NULL) {
-		PRINTF("%s(%d): failed to allocate memory\n", __func__, __LINE__);
-		return pdFALSE;
-	}
-
-	memset(status, 0, USER_CONNECT_STATUS_REPLY_SIZE);
-	da16x_cli_reply("status", NULL, status);
-
-//	PRINTF("\n**Neuralert: command line status string: [%s]\n", status);
-	if (strstr(status, "wpa_state=COMPLETED"))
-		result = pdTRUE;
-
-	vPortFree(status);
-
-	return result;
-}
 
 
 
@@ -3636,45 +3575,10 @@ static int user_process_bootup_event(void)
 	PRINTF("\n Software part number  :    %s", USER_SOFTWARE_PART_NUMBER_STRING);
 	PRINTF("\n Software version      :    %s", USER_VERSION_STRING);
 	PRINTF("\n Software build time   : %s %s", __DATE__ , __TIME__ );
-
 	notify_user_LED();
 
-	// Enable WIFI on initial bootup.
-	wifi_cs_rf_cntrl(FALSE);		// RF now on
-
-	/* See if automatic network connection is disabled and do an
-	 * connect to see if WIFI is available
-	 */
-	ret = da16x_get_config_int(DA16X_CONF_INT_STA_PROF_DISABLED, &netProfileUse);
-	if (ret != CC_SUCCESS || netProfileUse == pdFALSE)
-	{
-		PRINTF("\n Neuralert: [%s] NETWORK AUTO-START IS ENABLED", __func__);
-	}
-	else
-	{
-		PRINTF("\n Neuralert: [%s] NETWORK AUTO-START IS DISABLED", __func__);
-		PRINTF("\n Neuralert: [%s] Attempting manual connection for bootup", __func__);
-		ret = user_process_connect_ap(); // Try to make connection manually.
-	}
-
-	// The following delay serves three purposes.  It was originally added because
-	// the WIFI and MQTT startup activity seemed to interfere with
-	// SPI bus activity and, in particular, interfered with the initial
-	// erase of the external data flash.
-	// The second purpose is to give the user time to type in a
-	// command, such as:
-	//   "reset" to get to the ROM monitor to reflash the software
-	//   "user" and "run 0" to go back to provisioning mode (still needs power down and up)
-	// The third purpose is to give the SDK enough time to establish whether
-	// a WIFI connection is available and whether we can connect to the broker.
-	// If we're unable to connect, then we should let the user know via
-	// the LEDs
-	PRINTF("\n Neuralert [%s] Delay for reset and stabilization", __func__);
-	vTaskDelay(pdMS_TO_TICKS(10000));
-	PRINTF("\n Neuralert [%s] End stabilization delay", __func__);
-
-	// Turn off the wifi, we've already established we can connect or not.
-	wifi_cs_rf_cntrl(TRUE); // RF now off
+	// Turn off wifi, if it somehow got turned on
+	wifi_cs_rf_cntrl(TRUE);		// RF now off
 
 
 	// Whether WIFI is connected or not, see if we can obtain our
@@ -3692,46 +3596,68 @@ static int user_process_bootup_event(void)
 	MACaddr[3] = macstr[13];
 	MACaddr[4] = macstr[15];
 	MACaddr[5] = macstr[16];
-	PRINTF("\n Neuralert: [%s] MAC address - %s (type: %d)", __func__, macstr, MACaddrtype);
-	vTaskDelay(10); // Delay needed here to let the print statement finish before strcpy is called next.
+	PRINTF("\n MAC address - %s (type: %d)", __func__, macstr, MACaddrtype);
+	//vTaskDelay(10); // delay between obtaining the MAC addr and strcpy (below).  Delay for reset achieves this.
 
-	strcpy (pUserData->Device_ID, MACaddr);
-	PRINTF("\n Neuralert: [%s] Unique device ID: %s", __func__, MACaddr);
+	// The following delay gives the user time to type in a
+	// command, such as:
+	//   "reset" to get to the ROM monitor to reflash the software
+	//   "user" and "run 0" to go back to provisioning mode (still needs power down and up)
+	PRINTF("\n Delay for reset", __func__);
+	vTaskDelay(pdMS_TO_TICKS(10000));
+	PRINTF("\n End reset delay", __func__);
+
+
 
 	// Just in case the autoconnect got turned on, make sure it is off
 	user_process_disable_auto_connection();
 
 	// Initialize the accelerometer buffer external flash
-	if (user_process_initialize_AB()) {
-		PRINTF("\n Neuralert: [%s] Accelerometer flash buffering initialized", __func__);
-	} else {
+	if (!user_process_initialize_AB()) {
 		PRINTF("\n Neuralert: [%s] Accelerometer flash buffer NOT initialized", __func__);
-		//TODO: execute reboot
+		user_reboot();
 	}
+	PRINTF("\n Accelerometer flash buffer initialized");
 
-	pUserData->ACCEL_missed_interrupts = 0;
-	pUserData->ACCEL_transmit_trigger = MQTT_TRANSMIT_TRIGGER_FIFO_BUFFERS_FAST - MQTT_FIRST_TRANSMIT_TRIGGER_FIFO_BUFFERS;
+	// Copy the MACaddr to the UserData.  Note, strcpy spins up a new thread with higher priority
+	// and a hard fault appears to occur.  Make sure there is a delay between obtaining the MAC addr (above)
+	// and before calling strcpy (below)
 
-	// Initialize the FIFO interrupt cycle statistics
-	pUserData->FIFO_reads_this_power_cycle = 0;
+	// Initialize the user data
+	if (take_semaphore(&User_semaphore)) {
+		PRINTF("\n Neuralert [%s] error taking user semaphore", __func__);
+		user_reboot();
+	} else {
+		// Store device ID
+		strcpy (pUserData->Device_ID, MACaddr);
 
-	// Initialize the accelerometer timestamp bookkeeping
-	pUserData->last_accelerometer_wakeup_time_msec = 0;
-	pUserData->FIFO_reads_since_last_wakeup = 0;
-	pUserData->FIFO_samples_since_last_wakeup = 0;
-	pUserData->last_FIFO_read_time_ms = 0;
+		// Initialize the accelerometer timestamp bookkeeping
+		pUserData->last_FIFO_read_time_ms = 0;
+		pUserData->last_sleep_msec = 0;
 
-	// Initialize the MQTT statistics
-	pUserData->MQTT_stats_connect_attempts = 0;
-	pUserData->MQTT_stats_connect_fails = 0;
-	pUserData->MQTT_stats_packets_sent = 0;
-	pUserData->MQTT_stats_retry_attempts = 0;
-	pUserData->MQTT_stats_transmit_success = 0;
-	pUserData->MQTT_message_number = 0;
-	pUserData->MQTT_stats_packets_sent_last = 0;
 
-	pUserData->MQTT_dropped_data_events = 0;
-	pUserData->MQTT_last_message_id = 0;
+		pUserData->ACCEL_missed_interrupts = 0;
+		pUserData->ACCEL_transmit_trigger = MQTT_TRANSMIT_TRIGGER_FIFO_BUFFERS_FAST - MQTT_FIRST_TRANSMIT_TRIGGER_FIFO_BUFFERS;
+
+		// Initialize the FIFO interrupt cycle statistics
+		pUserData->FIFO_reads_this_power_cycle = 0;
+
+
+
+		// Initialize the MQTT statistics
+		pUserData->MQTT_stats_connect_attempts = 0;
+		pUserData->MQTT_stats_connect_fails = 0;
+		pUserData->MQTT_stats_packets_sent = 0;
+		pUserData->MQTT_stats_retry_attempts = 0;
+		pUserData->MQTT_stats_transmit_success = 0;
+		pUserData->MQTT_message_number = 0;
+		pUserData->MQTT_stats_packets_sent_last = 0;
+
+		pUserData->MQTT_dropped_data_events = 0;
+		pUserData->MQTT_last_message_id = 0;
+
+		xSemaphoreGive(User_semaphore);
+	}
 
 	// Initialize the accelerometer and enable the AXL interrupt
 	user_initialize_accelerometer();
