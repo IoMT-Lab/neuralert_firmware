@@ -168,7 +168,7 @@
 // This value if for the first transmission, which we want to occur relatively quickly after bootup.
 // each FIFO trigger is about 4 seconds, so if the following is set to 3, it will start the transmit
 // process within approximately 12 seconds.
-#define MQTT_FIRST_TRANSMIT_TRIGGER_FIFO_BUFFERS 3
+#define MQTT_FIRST_TRANSMIT_TRIGGER_FIFO_BUFFERS 2
 
 // This value is for switching between fast and slow transmit intervals.  When the number of unsuccessful
 // transmissions is less than this value, the fast mode will be used.  Otherwise, the slow mode.
@@ -331,7 +331,7 @@ typedef struct userData {
 	// Accelerometer buffer management
 	// *****************************************************
 	int8_t MQTT_internal_error;			// A genuine programming error, not transmit
-	AB_INDEX_TYPE next_AB_write_position; //TODO: repurpose the use of this variable for LIFO (not FIFO)
+	AB_INDEX_TYPE next_AB_write_position;
 	_AB_transmit_map_t AB_transmit_map[AB_TRANSMIT_MAP_SIZE]; //
 
 
@@ -416,7 +416,7 @@ static accelDataStruct accelXmitData[MAX_SAMPLES_PER_PACKET];
  * Area in which to compose JSON packet
  * see spreadsheet for sizing
  */
-#define MAX_JSON_STRING_SIZE 20000
+#define MAX_JSON_STRING_SIZE 10000 // double our usual packet size
 char mqttMessage[MAX_JSON_STRING_SIZE];
 
 
@@ -442,7 +442,7 @@ static UserDataBuffer *pUserData = NULL;
  * STATIC FUNCTIONS DEFINITIONS (forward declarations)
  *******************************************************************************
  */
-
+static int clear_AB_position(int, int);
 void user_start_MQTT_client();
 UINT8 system_state_bootup(void);
 static void user_create_MQTT_task(void);
@@ -647,6 +647,8 @@ static void notify_user_LED()
 
 
 
+
+
 /**
  *******************************************************************************
  * @brief Check if the system is in bootup mode
@@ -680,7 +682,7 @@ UINT8 check_mqtt_block()
  * copies up to (max_len - 1) characters and adds a null terminator
  * *******************************************************************************
  */
-void user_text_copy(UCHAR *to_string, UCHAR *from_string, int max_len)
+void user_text_copy(UCHAR *to_string, const UCHAR *from_string, const int max_len)
 {
 	int i;
 	for (i=0; (i < (max_len-1)); i++)
@@ -777,6 +779,33 @@ int user_factory_reset_btn_onetouch(void)
 	PRINTF("\n\n**** Factory Reset Button One Touch ***\n\n");
 	return pdTRUE;
 }
+
+
+/**
+ *******************************************************************************
+ * @brief Process to clear the accelerometer buffer management
+ * transmit map location, making sure it's done with exclusive access
+ *  Returns pdTRUE if unable to gain exclusive access
+ *  returns pdFALSE otherwise
+ *******************************************************************************
+ */
+static int clear_AB_position(int start_location, int end_location)
+{
+	if (take_semaphore(&User_semaphore)) {
+		PRINTF("\n Neuralert [%s] error taking user semaphore");
+		return pdTRUE;
+	} else {
+		// clear transmit map from start to end
+		for (int i=start_location; i<=end_location; i++)
+		{
+			CLR_AB_POS(pUserData->AB_transmit_map, i);
+		}
+		xSemaphoreGive(User_semaphore);
+	}
+
+	return pdFALSE;
+}
+
 
 
 /**
@@ -961,15 +990,13 @@ static float get_battery_voltage()
  *******************************************************************************
  */
 
-int send_json_packet(int startAdd, packetDataStruct pData, unsigned int transmission, int sequence)
+int send_json_packet(const int count, const unsigned int transmission, const int sequence)
 {
-
-	int count = pData.num_samples;
 
 	int return_status = 0;
 	int packet_len;
-	int statusCheck, i;
-	unsigned char str[50], str2[20];		// temp working strings for assembling
+	int i;
+	unsigned char str[80], str2[40];		// temp working strings for assembling
 	int16_t Xvalue;
 	int16_t Yvalue;
 	int16_t Zvalue;
@@ -980,19 +1007,10 @@ int send_json_packet(int startAdd, packetDataStruct pData, unsigned int transmis
 	time_t now;
 #endif /* __TIME64__ */
 	struct tm;
-	char buf[80], nowStr[20];
+	char nowStr[20];
 	float adcDataFloat;
 	unsigned char fault_count;
 
-	/*
-	 * Make sure that the MQTT client is still there -- JW: This check is probably unnecessary at this point
-	 */
-	statusCheck = mqtt_client_check_conn();
-	if (!statusCheck)
-	{
-		PRINTF("\nNeuralert: [%s] MQTT connection down - aborting", __func__);
-		return -1;
-	}
 
 	/*
 	 * JSON preamble
@@ -1096,7 +1114,7 @@ int send_json_packet(int startAdd, packetDataStruct pData, unsigned int transmis
 	strcat(mqttMessage,str);
 	for(i=0;i<count;i++)
 	{
-		Xvalue = accelXmitData[startAdd + i].Xvalue;
+		Xvalue = accelXmitData[i].Xvalue;
 		sprintf(str,"%d ",Xvalue);
 		strcat(mqttMessage,str);
 	}
@@ -1110,7 +1128,7 @@ int send_json_packet(int startAdd, packetDataStruct pData, unsigned int transmis
 	strcat(mqttMessage,str);
 	for(i=0;i<count;i++)
 	{
-		Yvalue = accelXmitData[startAdd + i].Yvalue;
+		Yvalue = accelXmitData[i].Yvalue;
 		sprintf(str,"%d ",Yvalue);
 		strcat(mqttMessage,str);
 	}
@@ -1124,7 +1142,7 @@ int send_json_packet(int startAdd, packetDataStruct pData, unsigned int transmis
 	strcat(mqttMessage,str);
 	for(i=0;i<count;i++)
 	{
-		Zvalue = accelXmitData[startAdd + i].Zvalue;
+		Zvalue = accelXmitData[i].Zvalue;
 		sprintf(str,"%d ",Zvalue);
 		strcat(mqttMessage,str);
 	}
@@ -1144,7 +1162,7 @@ int send_json_packet(int startAdd, packetDataStruct pData, unsigned int transmis
 	// which will transmit as 432000000
 	for(i=0;i<count;i++)
 	{
-		now = accelXmitData[startAdd + i].accelTime;
+		now = accelXmitData[i].accelTime;
 		// Break the timestamp into millions and remainder
 		// to be able to use sprintf, which doesn't handle
 		// 64-bit numbers.
@@ -1185,7 +1203,7 @@ int send_json_packet(int startAdd, packetDataStruct pData, unsigned int transmis
 	{
 		PRINTF("\n Neuralert: [%s] transmit %d:%d unsuccessful", __func__, transmission, sequence);
 	}
-
+	vTaskDelay(3); // to display the print statements
 	return return_status;
 }
 
@@ -1341,59 +1359,47 @@ void calculate_timestamp_for_sample(__time64_t *FIFO_ts, __time64_t *FIFO_ts_pre
  *
  *returns -1 if an error
  *returns number of samples in data array otherwise
+ *
  *******************************************************************************
  */
-static packetDataStruct assemble_packet_data (int start_block)
+static int assemble_packet_data (packetDataStruct *packet_data_ptr)
 {
-	// 0-based block index in Flash
-	// physical address in flash
-	int done = pdFALSE;
-	__time64_t block_timestamp;
-	__time64_t block_timestamp_prev;
-	__time64_t sample_timestamp;
-	accelBufferStruct FIFOblock;
 
-	int retry_count;
 
-	packetDataStruct packet_data;
+
+	// Initialize packet data
+	packet_data_ptr->start_block = packet_data_ptr->next_start_block;
+	packet_data_ptr->end_block = INVALID_AB_ADDRESS;
+	packet_data_ptr->num_blocks = 0;
+	packet_data_ptr->num_samples = 0;
+	packet_data_ptr->done_flag = pdFALSE;
+
+	PRINTF("\n\n Neuralert: [%s] assembling packet data starting at %d", __func__, packet_data_ptr->start_block);
+	vTaskDelay(3);
 
 	HANDLE SPI = NULL;
-
-	// Initialize output
-	packet_data.start_block = start_block;
-	packet_data.end_block = start_block;
-	packet_data.next_start_block = start_block;
-	packet_data.num_blocks = 0;
-	packet_data.num_samples = 0;
-	packet_data.done_flag = pdFALSE;
-	packet_data.nvram_error = pdFALSE;
-	packet_data.flash_error = FLASH_NO_ERROR;
-
-
-	PRINTF("\n\n Neuralert: [%s] assembling packet data starting at %d", __func__, start_block);
-
 	SPI = flash_open(SPI_MASTER_CLK, SPI_MASTER_CS);
 	if (SPI == NULL)
 	{
 		PRINTF("\n Neuralert: [%s] MAJOR SPI ERROR: Unable to open SPI bus handle", __func__);
-		packet_data.flash_error = FLASH_OPEN_ERROR;
-		return packet_data;
-		//todo: Major error, reboot system.
+		vTaskDelay(1);
+		return pdTRUE;
 	}
 
 	// Note that start_block may be less than or greater than end_block
 	// depending on whether we wrap around or not
 	// If we're only sending one block, then start_block will be
 	// equal to end_block
-	int blocknumber = start_block;
-	int check_bit_flag = 1; // always start with the check_bit_flag set to 1
+	int blocknumber = packet_data_ptr->start_block;
+
+	int done = pdFALSE;
 	while (!done)
 	{
 		// calculate the buffer gap
-		unsigned int buffer_gap = 0;
+		int buffer_gap = 0;
 		if (take_semaphore(&User_semaphore)) {
 			PRINTF("\n Neuralert: [%s] error taking user semaphore", __func__);
-			// do nothing, the buffer_gap will trigger ending packet assembly
+			return pdTRUE;
 		} else {
 			AB_INDEX_TYPE write_position = pUserData->next_AB_write_position;
 			xSemaphoreGive(User_semaphore);
@@ -1408,7 +1414,7 @@ static packetDataStruct assemble_packet_data (int start_block)
 
 		// check if the buffer gap is too close for comfort
 		if (buffer_gap <= AB_TRANSMIT_SAFETY_GAP){
-			packet_data.done_flag = pdTRUE;
+			packet_data_ptr->done_flag = pdTRUE;
 			done = pdTRUE;
 			break;
 		}
@@ -1417,63 +1423,67 @@ static packetDataStruct assemble_packet_data (int start_block)
 		// this is done by confirming we are in a new sizeof(_AB_transmit_map_t) chunk of data
 		// the easiest way to do this is to check whether one position higher was the last element
 		// in a chunk of data.  This is because we are traversing the queue in reverse.
-		if ((((blocknumber + 1) % sizeof(_AB_transmit_map_t)) == 0)
-				&& (buffer_gap >= AB_TRANSMIT_SAFETY_GAP + sizeof(_AB_transmit_map_t)))
-		{
-			if (take_semaphore(&User_semaphore)) {
-				PRINTF("\n Neuralert: [%s] error taking user semaphore", __func__);
-				packet_data.nvram_error = pdTRUE;
-			} else {
-				if (pUserData->AB_transmit_map[blocknumber / sizeof(_AB_transmit_map_t)] == 0)
-				{
-					check_bit_flag = 0;
-				} else {
-					check_bit_flag = 1;
-				}
-				xSemaphoreGive(User_semaphore);
+		int data_to_transmit = pdFALSE; // assume there is no data until proven otherwise
+		if (take_semaphore(&User_semaphore)) {
+			PRINTF("\n Neuralert: [%s] error taking user semaphore", __func__);
+			return pdTRUE; // error, exit
+		} else {
+			if (pUserData->AB_transmit_map[blocknumber / sizeof(_AB_transmit_map_t)] != 0)
+			{
+				data_to_transmit = pdTRUE;
 			}
+			xSemaphoreGive(User_semaphore);
 		}
 
-		if (check_bit_flag == 0) // the next sizeof(_AB_transmit_map_t) bits are zero
+
+
+		if (!data_to_transmit) // the next sizeof(_AB_transmit_map_t) bits are zero
 		{
 			blocknumber = blocknumber - sizeof(_AB_transmit_map_t);
 			if (blocknumber < 0) {
 				blocknumber = blocknumber + AB_FLASH_MAX_PAGES;
 			}
-			check_bit_flag = 1; // set this flag to one -- to force a check next round
 		}
-		else // check_bit_flag == 1
+		else // there is data to transmit in the sizeof(_AB_transmit_map_t) range near blocknumber
 		{
+			// find out if this blocknumber is ready for transmission (it could be a neighbor)
 			int transmit_flag = pdFALSE;
 			if (take_semaphore(&User_semaphore)) {
 				PRINTF("\n Neuralert: [%s] error taking user semaphore", __func__);
-				packet_data.nvram_error = pdTRUE;
+				return pdTRUE;
 			} else {
 				transmit_flag = POS_AB_SET(pUserData->AB_transmit_map, blocknumber);
 				xSemaphoreGive(User_semaphore);
 			}
 
-			if (transmit_flag == pdTRUE)
-			{
+			if (transmit_flag) {
 				// The current blocknumber is ready for transmission, Read the block from Flash
 				// For each block, assemble the XYZ data and assign a timestamp
 				// based on the block timestamp and the samples relation to
 				// when that timestamp was taken
 				// Calculate address of next sector to write
 				ULONG blockaddr = (ULONG) AB_FLASH_BEGIN_ADDRESS +
-				                  ((ULONG) AB_FLASH_PAGE_SIZE * (ULONG) blocknumber);
+								  ((ULONG) AB_FLASH_PAGE_SIZE * (ULONG) blocknumber);
+				int read_success = pdFALSE;
+				accelBufferStruct FIFOblock;
+				int retry_count = 0;
 				for (retry_count = 0; retry_count < 3; retry_count++)
 				{
+					FIFOblock.num_samples = 0;
 					if (take_semaphore(&Flash_semaphore)) {
 						PRINTF("\n Neuralert [%s] error taking flash semaphore", __func__);
-						packet_data.flash_error = FLASH_READ_ERROR;
+						// do nothing (we have a retry loop)
 					} else {
+
 						int spi_status = pageRead(SPI, blockaddr, (UINT8 *) &FIFOblock, sizeof(accelBufferStruct));
 						xSemaphoreGive(Flash_semaphore);
 						if(spi_status < 0){
 							PRINTF("\n Neuralert: [%s] unable to read block %d addr: %x\n", __func__, blocknumber, blockaddr);
-							packet_data.flash_error = FLASH_READ_ERROR;
+							// do nothing (we have a retry loop)
+						} else {
+							read_success = pdTRUE;
 						}
+						vTaskDelay(3);
 					}
 
 					if(FIFOblock.num_samples > 0)
@@ -1482,7 +1492,10 @@ static packetDataStruct assemble_packet_data (int start_block)
 					}
 				}
 
-				if (retry_count > 0)
+
+				if (!read_success) {
+					return pdTRUE; // failed to read, exit.
+				} else if (retry_count > 0)
 				{
 					PRINTF("\n Neuralert [%s] retried read %d times", __func__, retry_count);
 				}
@@ -1492,33 +1505,28 @@ static packetDataStruct assemble_packet_data (int start_block)
 				{
 					char block_timestamp_str[20];
 					// add the samples to the transmit array
-					packet_data.num_blocks++;
-					block_timestamp = FIFOblock.accelTime;
-					block_timestamp_prev = FIFOblock.accelTime_prev;
-					int block_samples;
-					block_samples = FIFOblock.num_samples;
+					__time64_t block_timestamp = FIFOblock.accelTime;
+					__time64_t block_timestamp_prev = FIFOblock.accelTime_prev;
+					__time64_t sample_timestamp;
 					time64_string (block_timestamp_str, &block_timestamp);
 					for (int i = 0; i<FIFOblock.num_samples; i++)
 					{
-						accelXmitData[packet_data.num_samples].Xvalue = FIFOblock.Xvalue[i];
-						accelXmitData[packet_data.num_samples].Yvalue = FIFOblock.Yvalue[i];
-						accelXmitData[packet_data.num_samples].Zvalue = FIFOblock.Zvalue[i];
+						accelXmitData[packet_data_ptr->num_samples].Xvalue = FIFOblock.Xvalue[i];
+						accelXmitData[packet_data_ptr->num_samples].Yvalue = FIFOblock.Yvalue[i];
+						accelXmitData[packet_data_ptr->num_samples].Zvalue = FIFOblock.Zvalue[i];
 						calculate_timestamp_for_sample(&block_timestamp, &block_timestamp_prev,
-								i, block_samples, &sample_timestamp);
-						accelXmitData[packet_data.num_samples].accelTime = sample_timestamp;
-						packet_data.num_samples++;
+								i, FIFOblock.num_samples, &sample_timestamp);
+						accelXmitData[packet_data_ptr->num_samples].accelTime = sample_timestamp;
+						packet_data_ptr->num_samples++;
 					}
 
-					if (packet_data.num_blocks == FIFO_BLOCKS_PER_PACKET)
+					packet_data_ptr->num_blocks++;
+					if (packet_data_ptr->num_blocks == FIFO_BLOCKS_PER_PACKET)
 					{
 						done = pdTRUE;
 					}
-				}
-				else
-				{
-					packet_data.flash_error = FLASH_DATA_ERROR;
-				}
-			} // else if (transmit_flag == 1)
+				} // FIFOblock.num_samples > 0
+			} //transmit_flag
 
 			// step to next block -- during transmission, we go backwards
 			blocknumber--;
@@ -1526,19 +1534,17 @@ static packetDataStruct assemble_packet_data (int start_block)
 				blocknumber = blocknumber + AB_FLASH_MAX_PAGES;
 			}
 
-		} // check_bit_flag == 1
-
+		} // data_to_transmit
 	} // while loop for processing data
 
 	flash_close(SPI);
 
-	packet_data.next_start_block = blocknumber;
-	packet_data.end_block = (blocknumber + 1) % AB_FLASH_MAX_PAGES; // Since blocknumber is now the next block
-
+	packet_data_ptr->next_start_block = blocknumber;
+	packet_data_ptr->end_block = (blocknumber + 1) % AB_FLASH_MAX_PAGES; // One block larger than the next start block
 	PRINTF("\n Neuralert: [%s] %d samples assembled from %d blocks",
-			__func__, packet_data.num_samples, packet_data.num_blocks);
+			__func__, packet_data_ptr->num_samples, packet_data_ptr->num_blocks);
 
-	return packet_data;
+	return pdFALSE;
 }
 
 
@@ -2151,15 +2157,12 @@ void user_retry_transmit(void)
 static void user_process_send_MQTT_data(void* arg)
 {
 	int status = 0;
-	int i;
-	int send_start_addr;
 	int msg_sequence;
 	unsigned int msg_transmission;
 	AB_INDEX_TYPE transmit_start_loc = INVALID_AB_ADDRESS;
 	int request_stop_transmit = pdFALSE;		// loop control for packet transmit loop
 	int request_retry_transmit = pdFALSE;
 	int transmit_complete = pdFALSE;
-	int packet_count;				// packet send counter
 
 	packetDataStruct packet_data;	// struct to capture packet meta data.
 
@@ -2215,10 +2218,7 @@ static void user_process_send_MQTT_data(void* arg)
 		// non-protected setup variables
 		msg_sequence = 0;
 
-		extern mqttParamForRtm mqttParams;
-		mqttParams.pub_msg_id = pUserData->MQTT_pub_msg_id + 1; // load saved pub_msg_id into user data (next id number)
-
-		vTaskDelay(3);
+		vTaskDelay(1);
 	}
 
 	// If there is no valid transmit position, we've been wakened by mistake
@@ -2265,21 +2265,33 @@ static void user_process_send_MQTT_data(void* arg)
 
 	vTaskDelay(1);
 	request_stop_transmit = pdFALSE;
-	packet_count = 0;
+	int packet_count = 0;
 	// Execute transmissions until done or told to stop
 	while ((request_stop_transmit == pdFALSE)
 			&& (transmit_complete == pdFALSE))
 	{
-		pUserData->MQTT_pub_msg_id = mqtt_client_get_pub_msg_id();
-		PRINTF("\n Neuralert: [%s] current pub_msg_id = %d", __func__, pUserData->MQTT_pub_msg_id);
+		if (take_semaphore(&User_semaphore)) {
+			PRINTF("\n Neuralert: [%s] error taking user semaphore", __func__);
+			//do nothing, we'll just re-use the last message id -- not ideal, but better than restarting.
+		} else {
+			extern mqttParamForRtm mqttParams;
+			mqttParams.pub_msg_id = ++pUserData->MQTT_pub_msg_id; // load saved pub_msg_id into user data (next id number)
+			xSemaphoreGive(User_semaphore);
+		}
+		PRINTF("\n Neuralert: [%s] current pub_msg_id = %d", __func__, mqtt_client_get_pub_msg_id());
 
-		packet_count++;
 
 		// assemble the packet into the user data
-		packet_data = assemble_packet_data(packet_data.next_start_block);
-		PRINTF("\n Neuralert: [%s] MQTT packet %d:  Start: %d End: %d num blocks: %d", __func__,
-				packet_count, packet_data.start_block, packet_data.end_block,
-				packet_data.num_blocks);
+		packet_count++;
+		if (assemble_packet_data(&packet_data)) {
+			PRINTF("\n Neuralert: [%s] Error building packet data", __func__);
+			packet_data.num_samples = 0;
+		} else {
+			PRINTF("\n Neuralert: [%s] MQTT packet %d:  Start: %d End: %d num blocks: %d num samples: %d", __func__,
+					packet_count, packet_data.start_block, packet_data.end_block,
+					packet_data.num_blocks, packet_data.num_samples);
+		}
+
 
 		if (packet_data.num_samples < 0)
 		{
@@ -2293,11 +2305,11 @@ static void user_process_send_MQTT_data(void* arg)
 		else
 		{
 			msg_sequence++;
-			send_start_addr = 0; //TODO: why are we always starting at 0?
 			da16x_sys_watchdog_notify(sys_wdog_id);
 			da16x_sys_watchdog_suspend(sys_wdog_id);
-			status = send_json_packet(send_start_addr, packet_data, msg_transmission, msg_sequence);
+			status = send_json_packet(packet_data.num_samples, msg_transmission, msg_sequence);
 			da16x_sys_watchdog_notify_and_resume(sys_wdog_id);
+
 			if(status == 0) //Transmission successful!
 			{
 				//we have succeeded in a transmission (bootup complete), so clear the bootup process  bit.
@@ -2317,40 +2329,45 @@ static void user_process_send_MQTT_data(void* arg)
 					// do nothing, if we don't clear the transmit locations then they will be resent next time.
 					// if attempts since tx success isn't updated, we'll stay in "fast" transmission mode longer
 				} else {
-					// A lot of bookkeeping things are happening here. The user semaphore held longer than usual.
+					// Do the stats
 					pUserData->MQTT_attempts_since_tx_success = 0; // must be protected by user semaphore
+					pUserData->MQTT_stats_packets_sent++; // must be protected by user semaphore
+					packets_sent++;		// Total packets sent this interval
+					samples_sent += packet_data.num_samples;
+					xSemaphoreGive(User_semaphore);
+
 
 					// Clear the transmission map corresponding to blocks in the packet
 					if (packet_data.start_block > packet_data.end_block)
 					{
-						// clear from "end" to "start" (because LIMO works backwards through the map)
-						for (i=packet_data.end_block; i<=packet_data.start_block; i++)
-						{
-							CLR_AB_POS(pUserData->AB_transmit_map, i);
+						if (clear_AB_position(packet_data.end_block, packet_data.start_block)) {
+							PRINTF("\n Neuralert [%s] error taking user semaphore");
+							//do nothing, the data will just be resent.
 						}
+						vTaskDelay(20); // give time for someone else to grab the user semaphore
+
 					}
 					else // there was a "wrap" in the buffer
 					{
-						// clear from "0" to "start" and from "end" to AB_MAX_FLASH_PAGES-1
-						for (i=0; i<=packet_data.start_block; i++)
-						{
-							CLR_AB_POS(pUserData->AB_transmit_map, i);
+						if (clear_AB_position(0, packet_data.start_block)) {
+							PRINTF("\n Neuralert [%s] error taking user semaphore");
+							//do nothing, the data will just be resent.
 						}
-						for (i=packet_data.end_block; i<=(AB_FLASH_MAX_PAGES-1); i++)
-						{
-							CLR_AB_POS(pUserData->AB_transmit_map, i);
+						vTaskDelay(20); // give time for another task to grab the user semaphore
+
+						if (clear_AB_position(packet_data.end_block, (AB_FLASH_MAX_PAGES - 1))) {
+							PRINTF("\n Neuralert [%s] error taking user semaphore");
+							//do nothing, the data will just be resent.
 						}
+						vTaskDelay(20);
+
 					}
 
-					// Do the stats
-					pUserData->MQTT_stats_packets_sent++; // must be protected by user semaphore
-					packets_sent++;		// Total packets sent this interval
-					samples_sent += packet_data.num_samples;
 
-					xSemaphoreGive(User_semaphore);
 				}
 				da16x_sys_watchdog_notify(sys_wdog_id);
 
+				vTaskDelay(5);
 			}
 			else if (pUserData->MQTT_tx_attempts_remaining > 0){
 				PRINTF("\n Neuralert: [%s] MQTT transmission %d:%d failed. Remaining attempts %d. Retry Transmission",
