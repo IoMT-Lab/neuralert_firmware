@@ -105,35 +105,9 @@
 // This includes the first try and subsequent retries
 #define AB_WRITE_MAX_ATTEMPTS 4
 // # of times the erase sector function will attempt the erase/verify cycle
-// ***NOTE*** there are two costs to multiple attempts.  The first is time.
-// As of 9/12/22 it was taking 40-60 msec per all to the erase function.
-// We need to stay inside the ~2 second AXL interrupt cycle so that we're
-// ready when the next interrupt occurs
-// The second cost is power.  The erase function uses a lot of power and
-// so many erases will use more battery.
-// When doing stress testing 9/11/22 to 9/13/22 we observed it taking as
-// many as 5 attempts
-// For instance, after running about 25 hours, we had these stats:
-//  Total sector erase attempts             : 2712
-//  Total times an erase retry was needed   : 2697
-//  Total times succeeded on try 1          : 8
-//  Total times succeeded on try 2          : 2659
-//  Total times succeeded on try 3          : 30
-//  Total times succeeded on try 4          : 7
-//  Total times succeeded on try 5          : 8
-// Although we need to figure out how to make this work on the first
-// try, for the first release, we increase max attempts so that the
-// software doesn't hang over 5 days for the customer
-// On 9/13/22 the erase attempt was happening around 220 msec after wakeup
-// and taking about 100 msec per erase/read cycle.  Soso in the worst
-// case, 7 x 100 = 700 msec, which is still only about half the entire
-// AXL FIFO interrupt time.
 #define AB_ERASE_MAX_ATTEMPTS 3
-/*
- * MQTT transmission setup
- * See spreadsheet for this calculation
- * One FIFO buffer
- */
+
+
 /*
  * Defines used by the MQTT transmission
  * The maximum sent in one packet should be a multiple of the acceleromter
@@ -143,14 +117,10 @@
  */
 #define SAMPLES_PER_FIFO					32
 
-/*
- * Stage 2 test information
- * 14 samples/sec * 60 seconds/min * 5 minutes = 4200
- * 4200 samples/ 32 samples/FIFO = 131.25 FIFO buffers full
- * Rounding down = 131 FIFO buffers
- */
-//#define FIFO_BUFFERS_PER_TRANSMIT_INTERVAL 131
-//#define SAMPLES_PER_TRANSMIT_INTERVAL (SAMPLES_PER_FIFO * FIFO_BUFFERS_PER_TRANSMIT_INTERVAL)
+// length of the timesync string
+// timesync is structured as: "2025.02.12 17:30:05 (GMT +0:00) 000029405"
+#define MAX_TIMESYNC_LENGTH				80
+
 
 // How long to wait for a WIFI AND MQTT connection each time the tx task starts up
 // This is just a task for how long it takes to connect -- not transmit.
@@ -308,7 +278,8 @@ typedef struct userData {
 	// *****************************************************
 	// MQTT transmission info
 	// *****************************************************
-	unsigned int MQTT_message_number;   // serial number for msgs
+	int MQTT_pub_msg_id;   // serial number for messages (must be an int)
+	unsigned int MQTT_transmission_number; // serial number for a transmission event (multiple messages)
 	unsigned int MQTT_stats_connect_attempts;	// stats: # times we tried
 	unsigned int MQTT_stats_connect_fails;	// # times we've failed to connect
 	unsigned int MQTT_stats_packets_sent;	// # times we've successfully sent a packet
@@ -318,7 +289,7 @@ typedef struct userData {
 	unsigned int MQTT_dropped_data_events;	// # times MQTT had to skip data because it was catching up to AXL
 	unsigned int MQTT_attempts_since_tx_success;  // # times MQTT has consecutively failed to transmit
 	unsigned int MQTT_tx_attempts_remaining; // # times MQTT can attempt to send this packet
-	unsigned int MQTT_inflight;			// indicates the number of inflight messages
+	unsigned int MQTT_inflight_protected;			// indicates the number of inflight messages
 	int MQTT_last_message_id; // indicates the MQTT message ID (ensures uniqueness)
 
 
@@ -474,21 +445,11 @@ static UserDataBuffer *pUserData = NULL;
 
 void user_start_MQTT_client();
 UINT8 system_state_bootup(void);
-static int user_process_connect_ap(void);
 static void user_create_MQTT_task(void);
 static void user_create_MQTT_stop_task(void);
 static int user_mqtt_send_message(void);
 void user_mqtt_connection_complete_event(void);
-static UCHAR user_process_check_wifi_conn(void);
 static int take_semaphore(SemaphoreHandle_t *);
-//static int check_AB_transmit_location(int, int); // kill this
-//static int clear_AB_transmit_location(int, int); // kill this
-//static int get_AB_write_location(void); // kill this
-//static int update_AB_write_location(void); // kill this
-//static int AB_read_block(HANDLE SPI, UINT32 blockaddress, accelBufferStruct *FIFOdata);
-//static void clear_MQTT_stat(unsigned int *stat); // kill this
-//unsigned int get_MQTT_stat(unsigned int *stat); // kill this
-//static void increment_MQTT_stat(unsigned int *stat); // kill this
 static void timesync_snapshot(void);
 static void user_reboot(void);
 
@@ -771,13 +732,18 @@ void my_app_mqtt_msg_cb(const char *buf, int len, const char *topic)
 
 void user_mqtt_pub_cb(int mid)
 {
-    pUserData->MQTT_last_message_id = mid; // store the last message id
+	PRINTF("\n Neuralert: [%s] MQTT PUB callback, clearing inflight", __func__);
 
-    PRINTF("\n Neuralert: [%s] MQTT PUB callback, clearing inflight", __func__);
-
-    // See user_mqtt_client_send_message_with_qos for what we're doing here.
-    pUserData->MQTT_inflight = 0; // clear the inflight variable
-    vTaskDelay(1);
+	// See user_mqtt_client_send_message_with_qos for what we're doing here.
+	if (take_semaphore(&User_semaphore)) {
+		PRINTF("\n Neuralert: [%s] error taking user semaphore", __func__);
+		// do nothing, a timeout will occur and the packet will be re-transmitted
+	} else {
+		pUserData->MQTT_last_message_id = mid; // store the last message id
+		pUserData->MQTT_inflight_protected = 0; // clear the inflight message counter
+		xSemaphoreGive(User_semaphore);
+	}
+	vTaskDelay(1);
 }
 
 void user_mqtt_conn_cb(void)
@@ -996,7 +962,7 @@ static float get_battery_voltage()
  *******************************************************************************
  */
 
-int send_json_packet(int startAdd, packetDataStruct pData, int msg_number, int sequence)
+int send_json_packet(int startAdd, packetDataStruct pData, unsigned int transmission, int sequence)
 {
 
 	int count = pData.num_samples;
@@ -1018,13 +984,6 @@ int send_json_packet(int startAdd, packetDataStruct pData, int msg_number, int s
 	char buf[80], nowStr[20];
 	float adcDataFloat;
 	unsigned char fault_count;
-
-
-
-	/* WLAN0 */
-#ifndef SILENT
-	PRINTF("WLAN0 - %s\n", macstr);
-#endif
 
 	/*
 	 * Make sure that the MQTT client is still there -- JW: This check is probably unnecessary at this point
@@ -1066,8 +1025,7 @@ int send_json_packet(int startAdd, packetDataStruct pData, int msg_number, int s
 	 *	and is subject to internet lag and internal processing times.  None of which matter practically speaking.
 	 *
 	 */
-	time64_string(buf, &pUserData->MQTT_timesync_timestamptime_msec);
-	sprintf(str,"\t\t\t\"timesync\": \"%s %s\",\r\n", pUserData->MQTT_timesync_current_time_str, buf);
+	sprintf(str,"\t\t\t\"timesync\": \"%s\",\r\n", pUserData->MQTT_timesync_current_time_str);
 	strcat(mqttMessage,str);
 
 	/* get battery value */
@@ -1094,7 +1052,7 @@ int send_json_packet(int startAdd, packetDataStruct pData, int msg_number, int s
 	/*
 	 * Meta - Transmission sequence #
 	 */
-	sprintf(str,"\t\t\t\t\"trans\": %d,\r\n", msg_number);
+	sprintf(str,"\t\t\t\t\"trans\": %d,\r\n", transmission);
 	strcat(mqttMessage, str);
 	/*
 	 * Meta - Message sequence this transmission
@@ -1208,13 +1166,13 @@ int send_json_packet(int startAdd, packetDataStruct pData, int msg_number, int s
 	strcat(mqttMessage,"\r\n\t\t}\r\n\t}\r\n}\r\n");
 
 	packet_len = strlen(mqttMessage);
-	PRINTF("\nNeuralert: [%s]: %d total message length\n", __func__, packet_len); // FRSDEBUG
+	PRINTF("\n Neuralert: [%s]: %d total message length", __func__, packet_len);
 	// Sanity check in case some future person expands message
 	// without increasing buffer size
 	if (packet_len > MAX_JSON_STRING_SIZE)
 	{
 		PRINTF("\nNeuralert: [%s] JSON packet size too big: %d with limit %d", __func__, packet_len, (int)MAX_JSON_STRING_SIZE);
-		//TODO: force a reboot if this happens.
+		user_reboot();
 	}
 
 
@@ -1222,11 +1180,11 @@ int send_json_packet(int startAdd, packetDataStruct pData, int msg_number, int s
 
 	if(return_status == 0)
 	{
-		PRINTF("\n Neuralert: [%s], transmit %d:%d successful", __func__, msg_number, sequence);
+		PRINTF("\n Neuralert: [%s], transmit %d:%d successful", __func__, transmission, sequence);
 	}
 	else
 	{
-		PRINTF("\n Neuralert: [%s] transmit %d:%d unsuccessful", __func__, msg_number, sequence);
+		PRINTF("\n Neuralert: [%s] transmit %d:%d unsuccessful", __func__, transmission, sequence);
 	}
 
 	return return_status;
@@ -1413,7 +1371,7 @@ static packetDataStruct assemble_packet_data (int start_block)
 	packet_data.flash_error = FLASH_NO_ERROR;
 
 
-	PRINTF("\n Neuralert: [%s] assembling packet data starting at %d", __func__, start_block);
+	PRINTF("\n\n Neuralert: [%s] assembling packet data starting at %d", __func__, start_block);
 
 	SPI = flash_open(SPI_MASTER_CLK, SPI_MASTER_CS);
 	if (SPI == NULL)
@@ -1578,8 +1536,8 @@ static packetDataStruct assemble_packet_data (int start_block)
 	packet_data.next_start_block = blocknumber;
 	packet_data.end_block = (blocknumber + 1) % AB_FLASH_MAX_PAGES; // Since blocknumber is now the next block
 
-	PRINTF("Assemble packet data: %d samples assembled from %d blocks\n",
-			packet_data.num_samples, packet_data.num_blocks);
+	PRINTF("\n Neuralert: [%s] %d samples assembled from %d blocks",
+			__func__, packet_data.num_samples, packet_data.num_blocks);
 
 	return packet_data;
 }
@@ -1848,20 +1806,31 @@ static int user_mqtt_client_send_message_with_qos(char *top, char *publish, ULON
 	int qos;
 	da16x_get_config_int(DA16X_CONF_INT_MQTT_QOS, &qos);
 
-	if (pUserData->MQTT_inflight > 0){
-		return -1; // A message is supposedly inflight
+	if (take_semaphore(&User_semaphore)) {
+		return -3; // couldn't get the semaphore
+	} else {
+		if (pUserData->MQTT_inflight_protected > 0){
+			xSemaphoreGive(User_semaphore);
+			return -1; // A message is supposedly inflight
+		}
+		pUserData->MQTT_inflight_protected = 1;
+		xSemaphoreGive(User_semaphore);
 	}
 
-	pUserData->MQTT_inflight = 1;
 	status = mqtt_pub_send_msg(top, publish);
 
 	if (!status && qos >= 1)
 	{
 		while (timeout--)
 		{
-			if (pUserData->MQTT_inflight == 0)
-			{
-				return 0;
+			if (take_semaphore(&User_semaphore)) {
+				return -3; // couldn't get the semaphore
+			} else {
+				if (pUserData->MQTT_inflight_protected == 0) {
+					xSemaphoreGive(User_semaphore);
+					return 0;
+				}
+				xSemaphoreGive(User_semaphore);
 			}
 
 			vTaskDelay(10);
@@ -1869,17 +1838,35 @@ static int user_mqtt_client_send_message_with_qos(char *top, char *publish, ULON
 
 		// a timeout has occurred.  clear the inflight variable and exit.
 		// we're going to kill the MQTT client next which will kill the actual inflight message
-		pUserData->MQTT_inflight = 0;
-		return -2;			/* timeout */
+		if (take_semaphore(&User_semaphore)) {
+			return -3;
+		} else {
+			pUserData->MQTT_inflight_protected = 0;
+			xSemaphoreGive(User_semaphore);
+			return -2;			/* timeout */
+		}
+
 	}
 	else if (!status && qos == 0)
 	{
-		pUserData->MQTT_inflight = 0;
+		if (take_semaphore(&User_semaphore)) {
+			return -3;
+		} else {
+			pUserData->MQTT_inflight_protected = 0;
+			xSemaphoreGive(User_semaphore);
+		}
+
 		return 0;
 	}
 	else
 	{
-		pUserData->MQTT_inflight = 0; // clear inflight, we'll kill the client next anyway
+		if (take_semaphore(&User_semaphore)) {
+			return -3;
+		} else {
+			pUserData->MQTT_inflight_protected = 0; // clear inflight, we'll kill the client next anyway
+			xSemaphoreGive(User_semaphore);
+		}
+
 		return -1;		/* error */
 	}
 }
@@ -1898,7 +1885,7 @@ static int user_mqtt_send_message(void)
 
 	unsigned long timeout_qos = 0;
 	timeout_qos = (unsigned long) (pdMS_TO_TICKS(MQTT_QOS_TIMEOUT_MS) / 10);
-	PRINTF("\n Neuralert: [%s] timeout qos: %lu", __func__, timeout_qos);
+	PRINTF("\n Neuralert: [%s] timeout qos: %lu\n", __func__, timeout_qos);
 
 	// note, don't call mqtt_client_send_message_with_qos in sub_client.c
 	// there is a race condition in that function.  We use the following which
@@ -2168,6 +2155,7 @@ static void user_process_send_MQTT_data(void* arg)
 
 	int send_start_addr;
 	int msg_sequence;
+	unsigned int msg_transmission;
 	int transmit_start_loc = INVALID_AB_ADDRESS;
 	int request_stop_transmit = pdFALSE;		// loop control for packet transmit loop
 	int request_retry_transmit = pdFALSE;
@@ -2216,15 +2204,27 @@ static void user_process_send_MQTT_data(void* arg)
 	// Mark our start time
 	user_time64_msec_since_poweron(&user_MQTT_start_msec);
 	time64_string(elapsed_sec_string, &user_MQTT_start_msec);
-	PRINTF("\n MQTT start milliseconds %s\n", __func__, elapsed_sec_string);
+	PRINTF("\n Neuralert: [%s] MQTT start milliseconds %s", __func__, elapsed_sec_string);
 	vTaskDelay(1);
 
-	// Retrieve the starting transmit block location
+	// Retrieve MQTT information from user data
 	if (take_semaphore(&User_semaphore)) {
 		PRINTF("\n Neuralert: [%s] error taking user semaphore", __func__);
+		goto end_of_task;
 	} else {
 		transmit_start_loc = pUserData->next_AB_write_position; // start where the NEXT write will take place
+		pUserData->MQTT_inflight_protected = 0; // This is a new transmission, clear any lingering inflight issues
+		msg_transmission = ++pUserData->MQTT_transmission_number;  // Increment transmission #
+
 		xSemaphoreGive(User_semaphore);
+
+		// non-protected setup variables
+		msg_sequence = 0;
+
+		extern mqttParamForRtm mqttParams;
+		mqttParams.pub_msg_id = pUserData->MQTT_pub_msg_id + 1; // load saved pub_msg_id into user data (next id number)
+
+		vTaskDelay(3);
 	}
 
 	// If there is no valid transmit position, we've been wakened by mistake
@@ -2246,7 +2246,9 @@ static void user_process_send_MQTT_data(void* arg)
 		transmit_start_loc += AB_FLASH_MAX_PAGES;
 	}
 
-	PRINTF("\n MQTT transmit starting at %d", __func__, transmit_start_loc);
+	PRINTF("\n Neuralert: [%s] MQTT transmit starting at %d", __func__, transmit_start_loc);
+
+
 
 	// *****************************************************************
 	//  MQTT transmission
@@ -2264,11 +2266,6 @@ static void user_process_send_MQTT_data(void* arg)
 		pUserData->MQTT_timesync_captured = 1;
 	}
 
-	// Our transmit extent was calculated above
-	msg_sequence = 0;
-	++pUserData->MQTT_message_number;  // Increment transmission #
-	pUserData->MQTT_inflight = 0; // This is a new transmission, clear any lingering inflight issues
-
 	// Set up transmit loop parameters
 	packet_data.next_start_block = transmit_start_loc;
 
@@ -2279,11 +2276,13 @@ static void user_process_send_MQTT_data(void* arg)
 	while ((request_stop_transmit == pdFALSE)
 			&& (transmit_complete == pdFALSE))
 	{
+		pUserData->MQTT_pub_msg_id = mqtt_client_get_pub_msg_id();
+		PRINTF("\n Neuralert: [%s] current pub_msg_id = %d", __func__, pUserData->MQTT_pub_msg_id);
+
 		packet_count++;
 
 		// assemble the packet into the user data
 		packet_data = assemble_packet_data(packet_data.next_start_block);
-
 		PRINTF("\n Neuralert: [%s] MQTT packet %d:  Start: %d End: %d num blocks: %d", __func__,
 				packet_count, packet_data.start_block, packet_data.end_block,
 				packet_data.num_blocks);
@@ -2303,22 +2302,31 @@ static void user_process_send_MQTT_data(void* arg)
 			send_start_addr = 0;
 			da16x_sys_watchdog_notify(sys_wdog_id);
 			da16x_sys_watchdog_suspend(sys_wdog_id);
-			status = send_json_packet(send_start_addr, packet_data, pUserData->MQTT_message_number, msg_sequence);
+			status = send_json_packet(send_start_addr, packet_data, msg_transmission, msg_sequence);
 			da16x_sys_watchdog_notify_and_resume(sys_wdog_id);
-			if(status == 0) //Tranmission successful!
+			if(status == 0) //Transmission successful!
 			{
 				//we have succeeded in a transmission (bootup complete), so clear the bootup process  bit.
 				if (take_semaphore(&Process_semaphore)) {
 					PRINTF("\n Neuralert: [%s] error taking process semaphore", __func__);
+					vTaskDelay(3); // to ensure display
 					// do nothing, we'll try to clear the process bit next transmission success.
 				} else {
 					CLR_BIT(processLists, USER_PROCESS_BOOTUP);
 					xSemaphoreGive(Process_semaphore);
 				}
-				notify_user_LED(); // notify the led
 
+				//JW DEBUG
+				PRINTF("\n GOING TO PAUSE 1");
+				da16x_sys_watchdog_notify(sys_wdog_id);
+				da16x_sys_watchdog_suspend(sys_wdog_id);
+				vTaskDelay(pdMS_TO_TICKS(3000));
+				da16x_sys_watchdog_notify_and_resume(sys_wdog_id);
+
+				da16x_sys_watchdog_notify(sys_wdog_id);
 				if (take_semaphore(&User_semaphore)) {
 					PRINTF("\n Neuralert: [%s] error taking user semaphore", __func__);
+					vTaskDelay(3); // to ensure disply
 					// do nothing, if we don't clear the transmit locations then they will be resent next time.
 					// if attempts since tx success isn't updated, we'll stay in "fast" transmission mode longer
 				} else {
@@ -2347,6 +2355,13 @@ static void user_process_send_MQTT_data(void* arg)
 						}
 					}
 
+					//JW DEBUG
+					PRINTF("\n GOING TO PAUSE 2");
+					da16x_sys_watchdog_notify(sys_wdog_id);
+					da16x_sys_watchdog_suspend(sys_wdog_id);
+					vTaskDelay(pdMS_TO_TICKS(3000));
+					da16x_sys_watchdog_notify_and_resume(sys_wdog_id);
+
 					// Do the stats
 					pUserData->MQTT_stats_packets_sent++; // must be protected by user semaphore
 					packets_sent++;		// Total packets sent this interval
@@ -2354,11 +2369,12 @@ static void user_process_send_MQTT_data(void* arg)
 
 					xSemaphoreGive(User_semaphore);
 				}
+				da16x_sys_watchdog_notify(sys_wdog_id);
 
 			}
 			else if (pUserData->MQTT_tx_attempts_remaining > 0){
 				PRINTF("\n Neuralert: [%s] MQTT transmission %d:%d failed. Remaining attempts %d. Retry Transmission",
-						__func__, pUserData->MQTT_message_number, msg_sequence, pUserData->MQTT_tx_attempts_remaining);
+						__func__, msg_transmission, msg_sequence, pUserData->MQTT_tx_attempts_remaining);
 				pUserData->MQTT_tx_attempts_remaining--;
 				request_stop_transmit = pdTRUE; // must set to true to exit loop
 				request_retry_transmit = pdTRUE;
@@ -2372,8 +2388,8 @@ static void user_process_send_MQTT_data(void* arg)
 			}
 			else
 			{
-				PRINTF("\nMQTT transmission %d:%d failed. Remaining attempts %d. Ending Transmission",
-						pUserData->MQTT_message_number, msg_sequence, pUserData->MQTT_tx_attempts_remaining);
+				PRINTF("\n Neuralert: [%s] MQTT transmission %d:%d failed. Remaining attempts %d. Ending Transmission",
+						__func__, msg_transmission, msg_sequence, pUserData->MQTT_tx_attempts_remaining);
 				request_stop_transmit = pdTRUE;
 			}
 			vTaskDelay(1);
@@ -2383,22 +2399,39 @@ static void user_process_send_MQTT_data(void* arg)
 		if (packet_data.done_flag == pdTRUE){
 			transmit_complete = pdTRUE; // there is no more data after this packet.
 		}
-	} // while we have stuff to transmit
+	} // while we have stuff to transmit (and not asking for transmission to stop)
 
-	if(!request_stop_transmit)
+
+	//JW DEBUG
+	PRINTF("\n GOING TO PAUSE 3");
+	da16x_sys_watchdog_notify(sys_wdog_id);
+	da16x_sys_watchdog_suspend(sys_wdog_id);
+	vTaskDelay(pdMS_TO_TICKS(3000));
+	da16x_sys_watchdog_notify_and_resume(sys_wdog_id);
+
+	if(transmit_complete)
 	{
 		if (take_semaphore(&User_semaphore)) {
 			PRINTF("\n Neuralert: [%s] error taking user semaphore", __func__);
+			vTaskDelay(3); // small delay to show error
 			// do nothing, just affects local logging
 		} else {
 			pUserData->MQTT_stats_transmit_success++;
 			xSemaphoreGive(User_semaphore);
 		}
 
-		PRINTF("\n MQTT transmission %d complete.  %d samples in %d JSON packets",
-				pUserData->MQTT_message_number, samples_sent, packets_sent);
+		PRINTF("\n Neuralert: [%s] MQTT transmission %d complete.  %d samples in %d JSON packets",
+				__func__, msg_transmission, samples_sent, packets_sent);
+		vTaskDelay(3); // delay to ensure the print statement is seen
 	}
 
+
+	//JW DEBUG
+	PRINTF("\n GOING TO PAUSE 4");
+	da16x_sys_watchdog_notify(sys_wdog_id);
+	da16x_sys_watchdog_suspend(sys_wdog_id);
+	vTaskDelay(pdMS_TO_TICKS(3000));
+	da16x_sys_watchdog_notify_and_resume(sys_wdog_id);
 
 	// Presumably we've finished sending and allowed time for a shutdown
 	// command or other message back from the cloud
@@ -2406,6 +2439,7 @@ static void user_process_send_MQTT_data(void* arg)
 end_of_task:
 	da16x_sys_watchdog_notify(sys_wdog_id);
 	da16x_sys_watchdog_suspend(sys_wdog_id);
+
 	if (request_retry_transmit){
 		user_retry_transmit();
 	}
@@ -2609,39 +2643,6 @@ static void user_create_MQTT_task()
 		PRINTF("\n Neuralert: [%s] MQTT transmit task failed to create", __func__);
 	}
 }
-
-
-/**
- *******************************************************************************
- * @brief Process to connect to an AP that stored in NVRAM.
- * return: 0 ; no error
- *******************************************************************************
- */
-static int user_process_connect_ap(void)
-{
-	int	ret = 0;
-
-	PRINTF("\n Neuralert: [%s]", __func__);
-
-	if (user_process_check_wifi_conn() == pdTRUE) {
-		PRINTF("\n Neuralert: [%s] already connected", __func__);
-
-		/* Connection is already established */
-		return ret;
-	}
-
-	// use the internal command line interface to connect
-	PRINTF("\n Neuralert: [%s] attempting connection", __func__);
-
-	char value_str[128] = {0, };
-	ret = da16x_cli_reply("select_network 0", NULL, value_str);
-	if (ret < 0 || strcmp(value_str, "FAIL") == 0) {
-		PRINTF("\n Neuralert: [%s] Failed connect to AP 0x%x\n", __func__, ret, value_str);
-	}
-
-	return ret;
-}
-
 
 
 
@@ -3027,7 +3028,7 @@ static int user_process_write_to_flash(accelBufferStruct *pFIFOdata, int *did_an
 	// Calculate address of next sector to write
 	NextWriteAddr = (ULONG)AB_FLASH_BEGIN_ADDRESS +
 			((ULONG)AB_FLASH_PAGE_SIZE * (ULONG)write_index);
-	PRINTF("-------------------------------\n");
+	PRINTF("\n-------------------------------\n");
 	PRINTF(" Next location to write: %d\n",write_index);
 	PRINTF(" Flash Write ADDR: 0x%X\r\n", NextWriteAddr);
 	PRINTF(" Data sequence # : %d\n", pFIFOdata->data_sequence);
@@ -3176,11 +3177,13 @@ end_of_task:
 static void timesync_snapshot(void)
 {
 
-struct tm *ts;
-char buf[USERLOG_STRING_MAX_LEN];
-char timestamp_string[20];
-__time64_t cur_msec;
-__time64_t cur_sec;
+	struct tm *ts;
+	char buf[MAX_TIMESYNC_LENGTH];
+	char buf2[20];
+
+	//__time64_t cur_msec;
+	__time64_t cur_sec;
+	__time64_t time_since_power_on;
 
 	/*
 	 * The format of the output string in the JSON packet is:
@@ -3188,8 +3191,8 @@ __time64_t cur_sec;
 	 *   "timesync": "2023.01.17 12:53:55 (GMT 00:00) 0656741",
 	 *
 	 * where the data consists of the current date and time in “local” time,
-	 * as configured when WIFI is set up.  T
-	 * he last field (0656741) is an internal timestamp in milliseconds
+	 * as configured when WIFI is set up.
+	 * The last field (0656741) is an internal timestamp in milliseconds
 	 * since power-on that corresponds to the current local time.
 	 * This will make it possible to align timestamps from different devices.
 	 *
@@ -3199,32 +3202,24 @@ __time64_t cur_sec;
 	 *
 	 */
 
-	// Get current time since power on (timestamp time) in milliseconds
-	user_time64_msec_since_poweron(&pUserData->MQTT_timesync_timestamptime_msec);
+	// Get current time since power on in milliseconds
+	user_time64_msec_since_poweron(&time_since_power_on);
+	time64_string(buf2, &time_since_power_on);
 
 	// Get current local time in milliseconds and seconds
-	da16x_time64_msec(NULL, &cur_msec);
-	pUserData->MQTT_timesync_localtime_msec = cur_msec;
-
-	cur_sec = ((cur_msec + 500ULL) / 1000ULL); /* sec rounded*/
+	da16x_time64_sec(NULL, &cur_sec);
 
 	// Convert to date and time
 	ts = (struct tm *)da16x_localtime64(&cur_sec);
 	// And get as a string
 	da16x_strftime(buf, sizeof (buf), "%Y.%m.%d %H:%M:%S", ts);
 	// And add time zone offset in case they configured this when
-	// provisioning the device.
+	// provisioning the device, and attach the time since power on.
 	sprintf(pUserData->MQTT_timesync_current_time_str,
-			"%s (GMT %+02d:%02d)",
-				buf,   da16x_Tzoff() / 3600,   da16x_Tzoff() % 3600);
+			"%s (GMT %+02d:%02d) %s",
+				buf,   da16x_Tzoff() / 3600,   da16x_Tzoff() % 3600, buf2);
 
-	PRINTF("\n **** Time sync established ***\n");
-	time64_string (timestamp_string, &pUserData->MQTT_timesync_timestamptime_msec);
-
-	PRINTF("  Timestamp: %s  Local time: %s\n\n", timestamp_string,
-			pUserData->MQTT_timesync_current_time_str);
-
-	return;
+	vTaskDelay(3);
 }
 
 
@@ -3580,7 +3575,6 @@ static int user_process_bootup_event(void)
 	// Turn off wifi, if it somehow got turned on
 	wifi_cs_rf_cntrl(TRUE);		// RF now off
 
-
 	// Whether WIFI is connected or not, see if we can obtain our
 	// MAC address
 	// Check our MAC string used as a unique device identifier
@@ -3596,7 +3590,7 @@ static int user_process_bootup_event(void)
 	MACaddr[3] = macstr[13];
 	MACaddr[4] = macstr[15];
 	MACaddr[5] = macstr[16];
-	PRINTF("\n MAC address - %s (type: %d)", __func__, macstr, MACaddrtype);
+	PRINTF("\n MAC address - %s (type: %d)", macstr, MACaddrtype);
 	//vTaskDelay(10); // delay between obtaining the MAC addr and strcpy (below).  Delay for reset achieves this.
 
 	// The following delay gives the user time to type in a
@@ -3650,8 +3644,10 @@ static int user_process_bootup_event(void)
 		pUserData->MQTT_stats_packets_sent = 0;
 		pUserData->MQTT_stats_retry_attempts = 0;
 		pUserData->MQTT_stats_transmit_success = 0;
-		pUserData->MQTT_message_number = 0;
+		pUserData->MQTT_transmission_number = 0;
+		pUserData->MQTT_pub_msg_id = 0;
 		pUserData->MQTT_stats_packets_sent_last = 0;
+		pUserData->MQTT_inflight_protected = 0;
 
 		pUserData->MQTT_dropped_data_events = 0;
 		pUserData->MQTT_last_message_id = 0;
