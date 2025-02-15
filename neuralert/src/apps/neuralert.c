@@ -504,7 +504,6 @@ __time64_t user_accelerometer_interrupt_msec;  // msec since boot when interrupt
 //
 __time64_t  user_AXL_poll_detect_RTC_clock;  // msec since boot when poll saw FIFO full
 __time64_t  user_lower_AXL_poll_detect_RTC_clock;  // msec since boot when poll was negative
-__time64_t  user_MQTT_start_msec;  // msec since boot when task started
 __time64_t  user_MQTT_end_msec;  // msec since boot when task ended
 ULONG user_MQTT_task_time_msec;   // run time msec
 
@@ -2152,11 +2151,11 @@ void user_retry_transmit(void)
 static void user_process_send_MQTT_data(void* arg)
 {
 	int status = 0;
-
+	int i;
 	int send_start_addr;
 	int msg_sequence;
 	unsigned int msg_transmission;
-	int transmit_start_loc = INVALID_AB_ADDRESS;
+	AB_INDEX_TYPE transmit_start_loc = INVALID_AB_ADDRESS;
 	int request_stop_transmit = pdFALSE;		// loop control for packet transmit loop
 	int request_retry_transmit = pdFALSE;
 	int transmit_complete = pdFALSE;
@@ -2181,6 +2180,7 @@ static void user_process_send_MQTT_data(void* arg)
 	} else {
 		CLR_BIT(processLists, USER_PROCESS_WATCHDOG);
 		xSemaphoreGive(Process_semaphore);
+		vTaskDelay(1);
 	}
 
 	// Wait until MQTT is actually connected before proceeding
@@ -2200,12 +2200,6 @@ static void user_process_send_MQTT_data(void* arg)
 	if (timeout <= 0){
 		goto end_of_task;
 	}
-
-	// Mark our start time
-	user_time64_msec_since_poweron(&user_MQTT_start_msec);
-	time64_string(elapsed_sec_string, &user_MQTT_start_msec);
-	PRINTF("\n Neuralert: [%s] MQTT start milliseconds %s", __func__, elapsed_sec_string);
-	vTaskDelay(1);
 
 	// Retrieve MQTT information from user data
 	if (take_semaphore(&User_semaphore)) {
@@ -2299,7 +2293,7 @@ static void user_process_send_MQTT_data(void* arg)
 		else
 		{
 			msg_sequence++;
-			send_start_addr = 0;
+			send_start_addr = 0; //TODO: why are we always starting at 0?
 			da16x_sys_watchdog_notify(sys_wdog_id);
 			da16x_sys_watchdog_suspend(sys_wdog_id);
 			status = send_json_packet(send_start_addr, packet_data, msg_transmission, msg_sequence);
@@ -2330,7 +2324,7 @@ static void user_process_send_MQTT_data(void* arg)
 					if (packet_data.start_block > packet_data.end_block)
 					{
 						// clear from "end" to "start" (because LIMO works backwards through the map)
-						for (int i=packet_data.end_block; i<=packet_data.start_block; i++)
+						for (i=packet_data.end_block; i<=packet_data.start_block; i++)
 						{
 							CLR_AB_POS(pUserData->AB_transmit_map, i);
 						}
@@ -2338,11 +2332,11 @@ static void user_process_send_MQTT_data(void* arg)
 					else // there was a "wrap" in the buffer
 					{
 						// clear from "0" to "start" and from "end" to AB_MAX_FLASH_PAGES-1
-						for (int i=0; i<=packet_data.start_block; i++)
+						for (i=0; i<=packet_data.start_block; i++)
 						{
 							CLR_AB_POS(pUserData->AB_transmit_map, i);
 						}
-						for (int i=packet_data.end_block; i<=AB_FLASH_MAX_PAGES-1; i++)
+						for (i=packet_data.end_block; i<=(AB_FLASH_MAX_PAGES-1); i++)
 						{
 							CLR_AB_POS(pUserData->AB_transmit_map, i);
 						}
