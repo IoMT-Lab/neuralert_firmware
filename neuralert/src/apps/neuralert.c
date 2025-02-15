@@ -2316,13 +2316,6 @@ static void user_process_send_MQTT_data(void* arg)
 					xSemaphoreGive(Process_semaphore);
 				}
 
-				//JW DEBUG
-				PRINTF("\n GOING TO PAUSE 1");
-				da16x_sys_watchdog_notify(sys_wdog_id);
-				da16x_sys_watchdog_suspend(sys_wdog_id);
-				vTaskDelay(pdMS_TO_TICKS(3000));
-				da16x_sys_watchdog_notify_and_resume(sys_wdog_id);
-
 				da16x_sys_watchdog_notify(sys_wdog_id);
 				if (take_semaphore(&User_semaphore)) {
 					PRINTF("\n Neuralert: [%s] error taking user semaphore", __func__);
@@ -2354,13 +2347,6 @@ static void user_process_send_MQTT_data(void* arg)
 							CLR_AB_POS(pUserData->AB_transmit_map, i);
 						}
 					}
-
-					//JW DEBUG
-					PRINTF("\n GOING TO PAUSE 2");
-					da16x_sys_watchdog_notify(sys_wdog_id);
-					da16x_sys_watchdog_suspend(sys_wdog_id);
-					vTaskDelay(pdMS_TO_TICKS(3000));
-					da16x_sys_watchdog_notify_and_resume(sys_wdog_id);
 
 					// Do the stats
 					pUserData->MQTT_stats_packets_sent++; // must be protected by user semaphore
@@ -2401,14 +2387,6 @@ static void user_process_send_MQTT_data(void* arg)
 		}
 	} // while we have stuff to transmit (and not asking for transmission to stop)
 
-
-	//JW DEBUG
-	PRINTF("\n GOING TO PAUSE 3");
-	da16x_sys_watchdog_notify(sys_wdog_id);
-	da16x_sys_watchdog_suspend(sys_wdog_id);
-	vTaskDelay(pdMS_TO_TICKS(3000));
-	da16x_sys_watchdog_notify_and_resume(sys_wdog_id);
-
 	if(transmit_complete)
 	{
 		if (take_semaphore(&User_semaphore)) {
@@ -2424,14 +2402,6 @@ static void user_process_send_MQTT_data(void* arg)
 				__func__, msg_transmission, samples_sent, packets_sent);
 		vTaskDelay(3); // delay to ensure the print statement is seen
 	}
-
-
-	//JW DEBUG
-	PRINTF("\n GOING TO PAUSE 4");
-	da16x_sys_watchdog_notify(sys_wdog_id);
-	da16x_sys_watchdog_suspend(sys_wdog_id);
-	vTaskDelay(pdMS_TO_TICKS(3000));
-	da16x_sys_watchdog_notify_and_resume(sys_wdog_id);
 
 	// Presumably we've finished sending and allowed time for a shutdown
 	// command or other message back from the cloud
