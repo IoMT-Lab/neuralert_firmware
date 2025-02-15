@@ -990,7 +990,7 @@ int user_factory_reset_btn_onetouch(void)
 void user_terminate_transmission_event(void)
 {
 	if (xTask) {
-		xTaskNotifyIndexed(xTask, 0, USER__TRANSMISSION_EVENT, eSetBits);
+		xTaskNotifyIndexed(xTask, 0, USER_TERMINATE_TRANSMISSION_EVENT, eSetBits);
 	}
 }
 
