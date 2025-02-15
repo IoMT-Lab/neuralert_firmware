@@ -17,8 +17,7 @@ file(GLOB NEURALERT_TARGET_SOURCE LIST_DIRECTORIES false
     src/drivers/*.c
 )
 
-add_executable(${NEURALERT_TARGET} ${NEURALERT_TARGET_SOURCE}
-        include/user_main/neuralert.h)
+add_executable(${NEURALERT_TARGET} ${NEURALERT_TARGET_SOURCE})
 target_include_directories(${NEURALERT_TARGET} PRIVATE ${NEURALERT_TARGET_INCLUDE})
 
 
