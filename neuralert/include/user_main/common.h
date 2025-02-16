@@ -384,10 +384,8 @@ typedef struct packetDataStruct
 	int num_samples;
 	int num_blocks;
 	int start_block;
-	int next_start_block;
 	int end_block;
-	int nvram_error;
-	int flash_error;
+	int next_start_block;
 	int done_flag;
 } packetDataStruct;
 
@@ -436,8 +434,8 @@ typedef struct packetDataStruct
 
 // The accelerometer buffer region is designed to hold 2 hours of
 // data, with one FIFO buffer structure per sector.
-// So, 14 samples/second x 2 hours = 100,800 samples / 28 samples per FIFO
-// results in 3600 pages.
+// So, 7 samples/second x 2 hours = 50,400 samples / 28 samples per FIFO
+// results in 1800 pages.
 // (We use 28 as a notional minimum, depending on the dynamic behavior as
 //  the software evolves.  As of this writing, 7/19/22, we are experiencing
 //  about 30 samples per read cycle.)
@@ -447,16 +445,12 @@ typedef struct packetDataStruct
 //
 // NOTE we need to add the guard zone size because it is unused area
 // Note that our 8 mbyte (64kbit) flash contains 2,048 4k sectors
-// and 32,768 256-byte pages.  Note that there is a log region planned in
-// upper flash memory
+// and 32,768 256-byte pages.
 //
-// 3600 pages / 16 = 225 4k sectors
-// 3600 plus 288 guard zone
-#define AB_FLASH_MAX_PAGES 3888 //MUST BE LESS THAN 65535 (see definition: uint16_t AB_transmit_stack[AB_FLASH_MAX_PAGES])
-// 640 pages = 40 sectors @ 4K
-// 640 pages = ~1472 seconds = ~24.5 minutes
-// So, for development, this will let us observe all behaviors
-//#define AB_FLASH_MAX_PAGES 640
+// 1800 pages / 16 = 113 4k sectors
+// 1800 plus 288 guard zone
+#define AB_FLASH_MAX_PAGES 2100
+
 
 typedef uint32_t _AB_transmit_map_t;
 
