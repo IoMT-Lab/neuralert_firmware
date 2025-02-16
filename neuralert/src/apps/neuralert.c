@@ -940,13 +940,13 @@ void user_wifi_connection_completed(void)
  * Note ADC has to have been configured during boot time.
  * See function config_pin_mux in user_main.c
  */
-static float get_battery_voltage()
+static int get_battery_voltage()
 {
 	/*
 	 * Battery voltage
 	 */
 	uint16_t adcData;
-	float adcDataFloat;
+	int adcDataNorm;
 	uint16_t write_data;
 	uint32_t data;
 
@@ -963,14 +963,14 @@ static float get_battery_voltage()
  	//
 	DRV_ADC_READ(hadc, DA16200_ADC_CH_0, (UINT32 *)&data, 0);
 	adcData = (data >> 4) & 0xFFF;
-	adcDataFloat = ((float)adcData * VREF)/4095.0;
+	adcDataNorm = (adcData * VREF) / 4095;
 
 
 	// turn off battery measurement circuit
 	write_data = 0;
 	GPIO_WRITE(gpioa, GPIO_PIN10, &write_data, sizeof(uint16_t));   /* disable battery input */
 
-	return adcDataFloat;
+	return adcDataNorm;
 }
 
 /**
@@ -994,7 +994,6 @@ int send_json_packet(const int count, const unsigned int transmission, const int
 {
 
 	int return_status = 0;
-	int packet_len;
 	int i;
 	unsigned char str[80], str2[40];		// temp working strings for assembling
 	int16_t Xvalue;
@@ -1008,7 +1007,6 @@ int send_json_packet(const int count, const unsigned int transmission, const int
 #endif /* __TIME64__ */
 	struct tm;
 	char nowStr[20];
-	float adcDataFloat;
 	unsigned char fault_count;
 
 
@@ -1046,10 +1044,8 @@ int send_json_packet(const int count, const unsigned int transmission, const int
 	strcat(mqttMessage,str);
 
 	/* get battery value */
-	adcDataFloat = get_battery_voltage();
-	//	    PRINTF("Current ADC Value: %d\n",(uint16_t)(adcDataFloat * 100));
-
-	sprintf(str,"\t\t\t\"bat\": %d,\r\n",(uint16_t)(adcDataFloat * 100));
+	int adcData = get_battery_voltage();
+	sprintf(str,"\t\t\t\"bat\": %d,\r\n",adcData);
 	strcat(mqttMessage,str);
 
 	// META FIELD DEFINITIONS HERE
@@ -1079,7 +1075,7 @@ int send_json_packet(const int count, const unsigned int transmission, const int
 	/*
 	* Meta - Battery value this transmission
 	*/
-	sprintf(str,"\t\t\t\t\"bat\": %d,\r\n",(uint16_t)(adcDataFloat * 100));
+	sprintf(str,"\t\t\t\t\"bat\": %d,\r\n",adcData);
 	strcat(mqttMessage, str);
 
 	/*
@@ -1182,7 +1178,7 @@ int send_json_packet(const int count, const unsigned int transmission, const int
 	 */
 	strcat(mqttMessage,"\r\n\t\t}\r\n\t}\r\n}\r\n");
 
-	packet_len = strlen(mqttMessage);
+	unsigned int packet_len = strlen(mqttMessage);
 	PRINTF("\n Neuralert: [%s]: %d total message length", __func__, packet_len);
 	// Sanity check in case some future person expands message
 	// without increasing buffer size
@@ -1214,7 +1210,7 @@ int send_json_packet(const int count, const unsigned int transmission, const int
  *        Format is just digits.  No commas or anything.
  *******************************************************************************
  */
-void time64_string (UCHAR *timestamp_str, __time64_t *timestamp)
+void time64_string (char *timestamp_str, const __time64_t *timestamp)
 {
 	__time64_t timestamp_copy;
 	char nowStr[20];
@@ -1239,7 +1235,7 @@ void time64_string (UCHAR *timestamp_str, __time64_t *timestamp)
  *        time in msec, because printf doesn't handle long longs
  *******************************************************************************
  */
-void time64_msec_string (UCHAR *time_str, __time64_t *time_msec)
+void time64_msec_string (char *time_str, const __time64_t *time_msec)
 {
 
 	ULONG time_milliseconds;
@@ -1274,7 +1270,7 @@ void time64_msec_string (UCHAR *time_str, __time64_t *time_msec)
  *        time in seconds, because printf doesn't handle long longs
  *******************************************************************************
  */
-void time64_seconds_string(UCHAR *time_str, __time64_t *time_msec)
+void time64_seconds_string(char *time_str, const __time64_t *time_msec)
 {
 
 	ULONG time_milliseconds;
@@ -1319,7 +1315,7 @@ void time64_seconds_string(UCHAR *time_str, __time64_t *time_msec)
  *
  *******************************************************************************
  */
-void calculate_timestamp_for_sample(__time64_t *FIFO_ts, __time64_t *FIFO_ts_prev, int offset,
+void calculate_timestamp_for_sample(const __time64_t *FIFO_ts, const __time64_t *FIFO_ts_prev, int offset,
 	int FIFO_samples, __time64_t *adjusted_timestamp)
 {
 	//__time64_t scaled_timestamp;	// times 1000 for more precise math
@@ -1439,7 +1435,7 @@ static int assemble_packet_data (packetDataStruct *packet_data_ptr)
 
 		if (!data_to_transmit) // the next sizeof(_AB_transmit_map_t) bits are zero
 		{
-			blocknumber = blocknumber - sizeof(_AB_transmit_map_t);
+			blocknumber = blocknumber - (int)(sizeof(_AB_transmit_map_t));
 			if (blocknumber < 0) {
 				blocknumber = blocknumber + AB_FLASH_MAX_PAGES;
 			}
@@ -1511,9 +1507,9 @@ static int assemble_packet_data (packetDataStruct *packet_data_ptr)
 					time64_string (block_timestamp_str, &block_timestamp);
 					for (int i = 0; i<FIFOblock.num_samples; i++)
 					{
-						accelXmitData[packet_data_ptr->num_samples].Xvalue = FIFOblock.Xvalue[i];
-						accelXmitData[packet_data_ptr->num_samples].Yvalue = FIFOblock.Yvalue[i];
-						accelXmitData[packet_data_ptr->num_samples].Zvalue = FIFOblock.Zvalue[i];
+						accelXmitData[packet_data_ptr->num_samples].Xvalue = (int16_t)FIFOblock.Xvalue[i];
+						accelXmitData[packet_data_ptr->num_samples].Yvalue = (int16_t)FIFOblock.Yvalue[i];
+						accelXmitData[packet_data_ptr->num_samples].Zvalue = (int16_t)FIFOblock.Zvalue[i];
 						calculate_timestamp_for_sample(&block_timestamp, &block_timestamp_prev,
 								i, FIFOblock.num_samples, &sample_timestamp);
 						accelXmitData[packet_data_ptr->num_samples].accelTime = sample_timestamp;
@@ -1567,11 +1563,12 @@ static int assemble_packet_data (packetDataStruct *packet_data_ptr)
 
 int parseDownlink(char *buf, int len)
 {
-	int i, j,k, argc, ptrCommand,status;
-	int tempInt;
+	int i, j,k, argc;
+	//int ptrCommand,status;
+	//int tempInt;
 	char str1[20];
 	char commands[4][90];
-	char *argvTmp[4] = {&commands[0][0], &commands[1][0], &commands[2][0], &commands[3][0]};
+	//char *argvTmp[4] = {&commands[0][0], &commands[1][0], &commands[2][0], &commands[3][0]};
 
 	PRINTF("parseDownlink %s %d\n",buf,len);
 
@@ -2169,7 +2166,6 @@ static void user_process_send_MQTT_data(void* arg)
 	// stats
 	int packets_sent = 0;		// actually sent during this transmission interval
 	int samples_sent = 0;
-	UCHAR elapsed_sec_string[40];
 
 	// Start up watchdog
 	int sys_wdog_id = da16x_sys_watchdog_register(pdFALSE);
@@ -2971,13 +2967,11 @@ static int user_process_write_to_flash(accelBufferStruct *pFIFOdata, int *did_an
 	ULONG NextWriteAddr;
 	ULONG SectorEraseAddr;
 	int rerunCount, faultFlag = 1;
-	UINT8 *reg;
 	int erase_status;
 	int write_status;
 	UINT32 write_fail_count;
 	accelBufferStruct checkFIFO;	// copy for readback check
 	int write_index;
-	int transmit_index;
 	int retry_count;
 
 	HANDLE SPI = NULL;
@@ -3220,20 +3214,14 @@ static int user_process_read_data(void)
 {
 	signed char rawdata[8];
 	unsigned char fiforeg[2];
-	int dataptr;
 	int i;
-	INT32 readstatus;
 	int storestatus;
-	int I2Cstatus;
 	unsigned int trigger_value;
-	UINT32 erase_fail_count, write_fail_count;
+
 	uint8_t ISR_reason;
 	__time64_t assigned_timestamp;		// timestamp to assign to FIFO reading
-	ULONG current_time_ms;
 	ULONG ms_since_last_read;
-	int archive_status;
 	int erase_happened;		// tells us if an erase sector has happened
-
 	int max_display;		// temp to figure out last active "try" position
 
 	// Make known to other processes that we are active
@@ -3260,16 +3248,19 @@ static int user_process_read_data(void)
 	// Note that even though the FIFO interrupt threshold is something
 	// like 30, there is a delay before we get to this point and we
 	// are quite likely to read extra samples.
-	dataptr = 0;
+	int8_t dataptr = 0;
 	while(((fiforeg[0] & 16) != 16) && (dataptr < MAX_ACCEL_FIFO_SIZE))
 	{
 		rawdata[0] = MC36XX_REG_XOUT_LSB; 	//Word Address to Write Data. 2 Bytes.
-		readstatus = i2cRead(MC3672_ADDR, rawdata, 6);
-
-		receivedFIFO.Xvalue[dataptr] = (/*((unsigned short)rawdata[1] << 8)*/ + rawdata[0]);
-		receivedFIFO.Yvalue[dataptr] = (/*((unsigned short)rawdata[3] << 8)*/ + rawdata[2]);
-		receivedFIFO.Zvalue[dataptr] = (/*((unsigned short)rawdata[5] << 8)*/ + rawdata[4]);
-		dataptr++;
+		if (!i2cRead(MC3672_ADDR, rawdata, 6)) {
+			PRINTF("\n Neuralert [%s] error reading data over i2c", __func__);
+			// do nothing, the data is gone, but we might as well continue
+		} else {
+			receivedFIFO.Xvalue[dataptr] = rawdata[0];
+			receivedFIFO.Yvalue[dataptr] = rawdata[2];
+			receivedFIFO.Zvalue[dataptr] = rawdata[4];
+			dataptr++;
+		}
 
 		// Reread status register with FIFO content info
 		fiforeg[0] = MC36XX_REG_STATUS_1;
@@ -3496,12 +3487,12 @@ void user_initialize_accelerometer(void)
 
 	// While loop to empty contents of FIFO before enabling RTC ISR  - NJ 6/30/2022
 	fiforeg[0] = MC36XX_REG_STATUS_1;
-	int status = i2cRead(MC3672_ADDR, fiforeg, 1);
+	i2cRead(MC3672_ADDR, fiforeg, 1);
 	while((fiforeg[0] & 16) != 16){
 		rawdata[0] = MC36XX_REG_XOUT_LSB; 	//Word Address to Write Data. 2 Bytes.
-		status = i2cRead(MC3672_ADDR, rawdata, 6);
+		i2cRead(MC3672_ADDR, rawdata, 6);
 		fiforeg[0] = MC36XX_REG_STATUS_1;
-		status = i2cRead(MC3672_ADDR, fiforeg, 1);
+		i2cRead(MC3672_ADDR, fiforeg, 1);
 		i++;
 	}
 	// Assign the initial timestamp.
@@ -3533,7 +3524,7 @@ void user_initialize_accelerometer(void)
  */
 static int user_process_bootup_event(void)
 {
-	int ret, netProfileUse;
+
 	int MACaddrtype = 0;
 
 	// initialize boot up process variables
@@ -3652,7 +3643,7 @@ static int user_process_bootup_event(void)
 		xSemaphoreGive(Process_semaphore);
 	}
 
-	return ret;
+	return pdFALSE;
 }
 
 
@@ -3839,7 +3830,6 @@ static void user_init(void)
  	pResultStr = read_nvram_string(NVR_KEY_SSID_0);
 	if (runMode == SYSMODE_STA_ONLY && strlen(pResultStr))
 	{
-		int result = 0;
 		UINT32 wakeUpMode;
 
 		wakeUpMode = da16x_boot_get_wakeupmode();
@@ -3847,7 +3837,7 @@ static void user_init(void)
 
 #ifdef CFG_USE_RETMEM_WITHOUT_DPM
 		/* Create the user retention memory and Initialize. */
-		result = user_retmmem_get(USER_RTM_DATA_TAG, (UCHAR **)&pUserData);
+		unsigned int result = user_retmmem_get(USER_RTM_DATA_TAG, (UCHAR **)&pUserData);
 		if (result == 0) {
 			PRINTF("\n Neuralert: [%s] allocating retention memory\n", __func__);
 			// created a memory for the user data
@@ -3971,7 +3961,6 @@ void tcp_client_sleep2_sample(void *param)
 	uint32_t ulNotifiedValue;
 	int storedRunFlag;
 	unsigned char fiforeg[2];
-	float adcDataFloat;
 	int sys_wdog_id = -1;
 
 	// MQTT callback setup
@@ -4069,9 +4058,9 @@ void tcp_client_sleep2_sample(void *param)
 	 * So, maybe 30 seconds or so.
 	 *
 	 */
-	adcDataFloat = get_battery_voltage();
+	uint16_t adcData = get_battery_voltage();
 	PRINTF(" User data size        : %u bytes\n", sizeof(UserDataBuffer));
-    PRINTF(" Battery reading       : %d\n",(uint16_t)(adcDataFloat * 100));
+    PRINTF(" Battery reading       : %d\n",adcData);
 
 
 

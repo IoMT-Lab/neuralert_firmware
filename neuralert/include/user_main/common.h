@@ -39,10 +39,10 @@
 
 
 #include <stdio.h>
-#include <stdbool.h>
+
 #include <string.h>
 #include <stdint.h>
-#include <FreeRTOS.h>
+#include <FreeRTOS.h> // This must be here (even though it is flagged as a warning)
 #include <task.h>
 #include "da16x_types.h"
 //#include "spi_flash/spi_flash.h"
@@ -120,14 +120,18 @@ enum LEDSTATE
 #define FC9050_ADC_DIVIDER_12		(4)
 #define FC9050_ADC_NUM_READ		(16)
 
-// Revised VREF, VREF_LOW, AND VREF_EXHAUSTED specified by Nicholas Joseph
-// 11/16/22 after reviewing the circuit and ADC spec
 
 // To get actual voltage reading, use the ration 54/25, which is the
-// ratio of the voltage divider going into the ADC
-#define VREF 1.4 // 1.4
-#define VREF_LOW 1.29 // 1.29
-#define VREF_EXHAUSTED 1.17 // 1.17
+// ratio of the voltage divider going into the ADC.  This VREF value is in centivolts.
+// In the future, we should map this to real centivolts of the battery and be independent
+// of the voltage divider settings.  The Neuralert backend wwas built with 140 as the max
+// battery value, so any change here would need to be done in coordination with the
+// backend/web team.
+#define VREF 140 // 1.4
+
+#if 0
+//#define VREF_LOW 129 // 1.29
+//#define VREF_EXHAUSTED 117 // 1.17
 //#define VREF_EXHAUSTED 1.24
 // Older values originally from Tim
 //#define VREF 3.3
@@ -135,7 +139,7 @@ enum LEDSTATE
 // Exhaused specified by Nicholas Joseph 11/9/22 after testing actual performance
 //#define VREF_EXHAUSTED 2.65
 //#define VREF_EXHAUSTED 2.8
-
+#endif
 
 /*
  * Console display attributes
@@ -528,7 +532,7 @@ extern int i2cRead(int addr, uint8_t *data, int length);
 void mc3672Init(void);
 //void accel_callback();
 void clear_intstate(uint8_t* state);
-void time64_string (UCHAR *timestamp_str, __time64_t *timestamp);
+void time64_string (char *timestamp_str, const __time64_t *timestamp);
 
 /*
  * Accelerometer flash buffer API functions
