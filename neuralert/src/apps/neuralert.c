@@ -115,7 +115,7 @@
  * consisting of FIFO reads
  *
  */
-#define SAMPLES_PER_FIFO					32
+#define SAMPLES_PER_FIFO				32
 
 // length of the timesync string
 // timesync is structured as: "2025.02.12 17:30:05 (GMT +0:00) 000029405"
@@ -230,10 +230,8 @@ typedef struct userData {
 	// The following variable keeps track of the most recent timestamp
 	// assigned to a FIFO buffer
 	__time64_t last_FIFO_read_time_ms;
-
 	// The following records when we last owk
 	__time64_t last_wakeup_msec;
-
 
 	// *****************************************************
 	// MQTT transmission info
@@ -259,7 +257,7 @@ typedef struct userData {
 	// *****************************************************
 	// Unique device identifier
 	// *****************************************************
-	char Device_ID[7];			// Unique device identifier used for publish & subscribe
+	char Device_ID[10];			// Unique device identifier used for publish & subscribe
 
 	// *****************************************************
 	// Accelerometer info
@@ -267,6 +265,7 @@ typedef struct userData {
 	unsigned int ACCEL_read_count;			// how many FIFO reads total
 	unsigned int ACCEL_transmit_trigger;	// count of FIFOs to start transmit
 	unsigned int ACCEL_missed_interrupts;	// How many times we detected full FIFO by polling
+
 	// *****************************************************
 	// External data flash (AB memory) statistics
 	// *****************************************************
@@ -283,12 +282,8 @@ typedef struct userData {
 	// *****************************************************
 	// Accelerometer buffer management
 	// *****************************************************
-	int8_t MQTT_internal_error;			// A genuine programming error, not transmit
 	AB_INDEX_TYPE next_AB_write_position;
 	_AB_transmit_map_t AB_transmit_map[AB_TRANSMIT_MAP_SIZE]; //
-
-
-
 
 } UserDataBuffer;
 #endif
@@ -947,10 +942,13 @@ int send_json_packet(const int count, const unsigned int transmission, const int
 
 	int return_status = 0;
 	int i;
-	unsigned char str[MAX_TIMESYNC_LENGTH], str2[40];		// temp working strings for assembling
+	unsigned char str[80], str2[40];		// temp working strings for assembling
 	int16_t Xvalue;
 	int16_t Yvalue;
 	int16_t Zvalue;
+	char device_id[10];
+	char timesync[MAX_TIMESYNC_LENGTH];
+
 
 #ifdef __TIME64__
 	__time64_t now;
@@ -961,12 +959,16 @@ int send_json_packet(const int count, const unsigned int transmission, const int
 	char nowStr[20];
 	unsigned char fault_count;
 
-	// get data from memory
-	//if (take_semaphore(&User_semaphore)) {
-	//	PRINTF("\n Neuralert: [%s] error taking user semaphore");
-	//} else {
-	//
-	//}
+	// get data from user memory
+	if (take_semaphore(&User_semaphore)) {
+		PRINTF("\n Neuralert: [%s] error taking user semaphore");
+		PRINTF("\n Neuralert: [%s] transmit %d:%d unsuccessful", __func__, transmission, sequence);
+		return pdTRUE;
+	} else {
+		strcpy(device_id, pUserData->Device_ID);
+		strcpy(timesync, pUserData->MQTT_timesync_current_time_str);
+		xSemaphoreGive(User_semaphore);
+	}
 
 
 	/*
@@ -977,7 +979,7 @@ int send_json_packet(const int count, const unsigned int transmission, const int
 	 * MAC address of device - stored in retention memory
 	 * during the bootup event
 	 */
-	sprintf(str,"\t\t\t\"id\": \"%s\",\r\n", pUserData->Device_ID);
+	sprintf(str,"\t\t\t\"id\": \"%s\",\r\n", device_id);
 	strcat(mqttMessage,str);
 
 
@@ -999,7 +1001,8 @@ int send_json_packet(const int count, const unsigned int transmission, const int
 	 *	and is subject to internet lag and internal processing times.  None of which matter practically speaking.
 	 *
 	 */
-	sprintf(str,"\t\t\t\"timesync\": \"%s\",\r\n", pUserData->MQTT_timesync_current_time_str);
+
+	sprintf(str,"\t\t\t\"timesync\": \"%s\",\r\n", timesync);
 	strcat(mqttMessage,str);
 
 	/* get battery value */
@@ -1014,7 +1017,7 @@ int send_json_packet(const int count, const unsigned int transmission, const int
 	 * Meta - MAC address of device - stored in retention memory
 	 * during the bootup event
 	 */
-	sprintf(str,"\t\t\t\t\"id\": \"%s\",\r\n",pUserData->Device_ID);
+	sprintf(str,"\t\t\t\t\"id\": \"%s\",\r\n",device_id);
 	strcat(mqttMessage,str);
 	/*
 	* Meta - Firmware Version
@@ -1582,6 +1585,7 @@ int parseDownlink(char *buf, int len)
 //			PRINTF("i: %d %s\r\n",i,argvTmp[i]);
 	}
 
+#if 0 // leaving this here for now to work on the OTA provisioning.
 	if(strcmp(&commands[0][0],"terminate") == 0)
 	{
 		if(argc < 2)
@@ -1594,8 +1598,8 @@ int parseDownlink(char *buf, int len)
 			PRINTF("\n Neuralert: [%s] terminate command with wrong device identifier: %s", __func__,
 					&commands[1][0]);
 		}
-
 	}
+#endif
 
 	return TRUE;
 }
@@ -2168,7 +2172,7 @@ static void user_process_send_MQTT_data(void* arg)
 		// end user can coordinate the left and right wrist datastreams
 		if(pUserData->MQTT_timesync_captured == 0)
 		{
-			timesync_snapshot();
+			timesync_snapshot(); // no semaphore protection inside timesync_snapshot
 			pUserData->MQTT_timesync_captured = 1;
 		}
 
@@ -2548,9 +2552,18 @@ static void user_create_MQTT_task()
 		}
 	}
 
-	BaseType_t create_status;
+	// Prior to starting to transmit data, we need to restore the message id state
+	// so we have unique message ids for each client message
+	if (take_semaphore(&User_semaphore)) {
+		PRINTF("\n Neuralert: [%s] error taking user semaphore", __func__);
+		// do nothing, we'll over-write data at the broker, but no reason to crash the system
+	} else {
+		extern struct mosquitto	*mosq_sub;
+		mosq_sub->last_mid = pUserData->MQTT_pub_msg_id;
+		xSemaphoreGive(User_semaphore);
+	}
 
-	create_status = xTaskCreate(
+	BaseType_t create_status = xTaskCreate(
 			user_process_send_MQTT_data,
 			"USER_MQTT", 				// Task name
 			(6*1024),					//we've seen near 4K stack utilization in testing, 50% buffer for safety.
@@ -2649,6 +2662,10 @@ static int take_semaphore(SemaphoreHandle_t *ptr)
  * See document "Neuralert accelerometer data buffer design" for
  * details of this design
  *
+ * This function takes the User_semaphore for its entirety and should not
+ * be used in parallel with any processes needing the User_semaphore.  Moreover
+ * it will only give up the
+ *
  * returns pdTRUE if initialization succeeds
  * returns pdFALSE is a problem happens with the Flash initialization
  *******************************************************************************
@@ -2662,11 +2679,17 @@ static int user_process_initialize_AB(void)
 	HANDLE SPI = NULL;
 	int i;
 
+	if (take_semaphore(&User_semaphore)) {
+		PRINTF("\n Neuralert: [%s] error taking user semaphore");
+		return pdFALSE;
+	}
+
 	pUserData->write_fault_count = 0;
 	pUserData->write_retry_count = 0;
 	pUserData->erase_attempts = 0;
 	pUserData->erase_fault_count = 0;
 	pUserData->erase_retry_count = 0;
+
 	for (i = 0; i < AB_WRITE_MAX_ATTEMPTS; i++)
 	{
 		pUserData->write_attempt_events[i] = 0;
@@ -2684,6 +2707,7 @@ static int user_process_initialize_AB(void)
 	if (SPI == NULL)
 	{
 		PRINTF("\n Neuralert: [%s] SPI initalization error", __func__);
+		xSemaphoreGive(User_semaphore);
 		return pdFALSE;
 	}
 
@@ -2692,6 +2716,7 @@ static int user_process_initialize_AB(void)
 	if (!spi_status)
 	{
 		PRINTF("\n Neuralert: [%s] SPI initalization error", __func__);
+		xSemaphoreGive(User_semaphore);
 		return pdFALSE;
 	}
 
@@ -2718,11 +2743,13 @@ static int user_process_initialize_AB(void)
 	if(!erase_status)
 	{
 		PRINTF("\n Neuralert: [%s] SPI erase error", __func__);
+		xSemaphoreGive(User_semaphore);
 		return pdFALSE;
 	}
 
 	flash_close(SPI);
 
+	xSemaphoreGive(User_semaphore);
 	return pdTRUE;
 
 }
@@ -2818,7 +2845,14 @@ static int user_erase_flash_sector(HANDLE SPI, ULONG SectorEraseAddr)
 	PRINTF("-------------------------------\n");
 
 	erase_mismatch_count = 0;
-	pUserData->erase_attempts++;  // total sectors we tried to erase
+	// do some logging
+	if (take_semaphore(&User_semaphore)) {
+		PRINTF("\n Neuralert: [%s] error taking user semaphore", __func__);
+		// do nothing, logging isn't critical
+	} else {
+		pUserData->erase_attempts++;  // total sectors we tried to erase
+		xSemaphoreGive(User_semaphore);
+	}
 
 	// Note - as of 9/10/22 the erase sector was taking about 50 milliseconds
 	// We have to be careful not to overrun the accelerometer interrupt here
@@ -2879,17 +2913,24 @@ static int user_erase_flash_sector(HANDLE SPI, ULONG SectorEraseAddr)
 		} // semaphore was obtained
 	} // for rerunCount < max retries
 
-	if(faultFlag != 0)
-	{
-		pUserData->erase_fault_count++;  // total write failures since power on
-	}
-	else if(retry_count > 1)
-	{
-		pUserData->erase_retry_count++;	 // total # of times retry worked
-	}
-	// Log how many times we succeeded on each attempt count; [0] is first try, etc.
-	pUserData->erase_attempt_events[retry_count-1]++;
+	//do some logging
+	if (take_semaphore(&User_semaphore)) {
+		PRINTF("\n Neuralert: [%s] error taking user semaphore",__func__);
+		// do nothing, logging isn't critical
+	} else {
+		if(faultFlag != 0)
+		{
+			pUserData->erase_fault_count++;  // total write failures since power on
+		}
+		else if(retry_count > 1)
+		{
+			pUserData->erase_retry_count++;	 // total # of times retry worked
+		}
+		// Log how many times we succeeded on each attempt count; [0] is first try, etc.
+		pUserData->erase_attempt_events[retry_count-1]++;
 
+		xSemaphoreGive(User_semaphore);
+	}
 
 end_of_task:
 
@@ -3027,16 +3068,25 @@ static int user_process_write_to_flash(accelBufferStruct *pFIFOdata, int *did_an
 		}
 	} // for rerunCount < max retries
 
-	if(faultFlag != 0)
-	{
-		pUserData->write_fault_count++;  // total write failures since power on
+	// do some logging
+	if (take_semaphore(&User_semaphore)) {
+		PRINTF("\n Neuralert: [%s] error taking user semaphore",__func__);
+		//do nothing, the log error isn't critical to functionality
+	} else {
+		if(faultFlag != 0)
+		{
+			pUserData->write_fault_count++;  // total write failures since power on
+		}
+		else if(retry_count > 1)
+		{
+			pUserData->write_retry_count++;	 // total # of times retry worked
+		}
+		// Log how many times we succeeded on each attempt count; [0] is first try, etc.
+		pUserData->write_attempt_events[retry_count-1]++;
+
+		xSemaphoreGive(User_semaphore);
 	}
-	else if(retry_count > 1)
-	{
-		pUserData->write_retry_count++;	 // total # of times retry worked
-	}
-	// Log how many times we succeeded on each attempt count; [0] is first try, etc.
-	pUserData->write_attempt_events[retry_count-1]++;
+
 
 	// Note if we had a write failure, we should skip the following update
 	if(faultFlag != 0)
@@ -3094,6 +3144,9 @@ end_of_task:
  *******************************************************************************
  * @brief Take a snapshot of "wall clock" time for the JSON timesync field
  *
+ *  This helper funciton assumes that it is called after taking the
+ *  User_semaphore.  It is unsafe otherwise.  There is no error checking for this.
+ *  in the timesync_snapshore function.
  *******************************************************************************
  */
 static void timesync_snapshot(void)
@@ -3137,6 +3190,8 @@ static void timesync_snapshot(void)
 	da16x_strftime(buf, sizeof (buf), "%Y.%m.%d %H:%M:%S", ts);
 	// And add time zone offset in case they configured this when
 	// provisioning the device, and attach the time since power on.
+	// NOTE: this function MUST be called after taking User_semaphore -- there is no semaphore protection
+	// in this function.
 	sprintf(pUserData->MQTT_timesync_current_time_str,
 			"%s (GMT %+02d:%02d) %s",
 				buf,   da16x_Tzoff() / 3600,   da16x_Tzoff() % 3600, buf2);
@@ -3567,11 +3622,8 @@ static UCHAR user_process_event(UINT32 event)
 	// This is only expected to happen once when the device is
 	// activated
 	if (event & USER_BOOTUP_EVENT) {
-//		PRINTF("\n**Neuralert: %s Bootup event\n", __func__); // FRSDEBUG
 
 		isPowerOnBoot = pdTRUE;		// tell accelerometer what's up
-
-//		user_process_create_rtc_timer(USER_RTC_TIMER_ID, USER_DATA_TX_TIMER_SEC);
 
 		// Do one-time power-on stuff
 		user_process_bootup_event();
@@ -3963,14 +4015,21 @@ void neuralert_app(void *param)
 	 * set up, see if we know our device ID yet.  (Happens during
 	 * the initial boot event)
 	 */
-	if (strlen(pUserData->Device_ID) > 0)
-	{
-		PRINTF(" Unique device ID      : %s\n", pUserData->Device_ID);
+	if (take_semaphore(&User_semaphore)) {
+		PRINTF("\n Neuralert: [%s] error taking user semaphore", __func__);
+		// do nothing, just for internal display
+	} else {
+		if (strlen(pUserData->Device_ID) > 0)
+		{
+			PRINTF(" Unique device ID      : %s\n", pUserData->Device_ID);
+		}
+		else
+		{
+			PRINTF(" Unique device ID not acquired yet\n");
+		}
+		xSemaphoreGive(User_semaphore);
 	}
-	else
-	{
-		PRINTF(" Unique device ID not acquired yet\n");
-	}
+
 
 
 	/*
