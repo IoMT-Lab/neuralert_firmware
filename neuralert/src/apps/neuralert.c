@@ -231,9 +231,6 @@ typedef struct userData {
 	// assigned to a FIFO buffer
 	__time64_t last_FIFO_read_time_ms;
 
-	// The following tracks the go-to-sleep time
-	__time64_t last_sleep_msec;
-
 	// The following records when we last owk
 	__time64_t last_wakeup_msec;
 
@@ -3508,7 +3505,7 @@ static int user_process_bootup_event(void)
 
 		// Initialize the accelerometer timestamp bookkeeping
 		pUserData->last_FIFO_read_time_ms = 0;
-		pUserData->last_sleep_msec = 0;
+		pUserData->last_wakeup_msec = 0;
 
 
 		pUserData->ACCEL_missed_interrupts = 0;
@@ -3562,7 +3559,6 @@ static int user_process_bootup_event(void)
 static UCHAR user_process_event(UINT32 event)
 {
 	__time64_t awake_time = 0;
-	__time64_t since_last_sleep = 0;
 	__time64_t current_msec_since_boot;
 
 	PRINTF("%s: Event: [%d]\n", __func__, event);
@@ -3645,9 +3641,7 @@ static UCHAR user_process_event(UINT32 event)
 			} else {
 				// Get relative time since power on from the RTC time counter register
 				awake_time = current_msec_since_boot - pUserData->last_wakeup_msec;
-				since_last_sleep = current_msec_since_boot - pUserData->last_sleep_msec;
-				PRINTF("\n Entering sleep1. msec awake %u, msec since last sleep %u \n\n", awake_time, since_last_sleep);
-				user_time64_msec_since_poweron(&(pUserData->last_sleep_msec));
+				PRINTF("Entering sleep1. msec awake %u \n\n", awake_time);
 				xSemaphoreGive(User_semaphore);
 			}
 			vTaskDelay(5); // delay to let everything settle down before sleep 1
@@ -3666,9 +3660,8 @@ static UCHAR user_process_event(UINT32 event)
 				// do nothing, just used for logging
 			} else {
 				awake_time = current_msec_since_boot - pUserData->last_wakeup_msec;
-				since_last_sleep = current_msec_since_boot - pUserData->last_sleep_msec;
 				xSemaphoreGive(User_semaphore);
-				PRINTF("\n Unable to sleep. msec awake %u, msec since last sleep %u \n\n", awake_time, since_last_sleep);
+				PRINTF("Unable to sleep. msec awake %u\n\n", awake_time);
 			}
 		}
 	}
