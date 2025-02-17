@@ -39,7 +39,6 @@
 
 #include "user_command.h"
 
-//JW: EVERYTHING IN THIS File that is wrapped in if defined(__TCP_CLIENT_SLEEP2_SAMPLE__) was added
 #include "app_common_util.h"
 #include "app_provision.h"
 // #include "app_aws_user_conf.h" - Not needed - NJ - 05/19/2022
