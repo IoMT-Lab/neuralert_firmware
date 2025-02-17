@@ -74,7 +74,7 @@ static void user_wifi_conn_fail(void *arg);
 static void user_wifi_disconn(void *arg);
 #endif  // __SUPPORT_WIFI_CONN_CB__ && !( __ENABLE_SAMPLE_APP__ )
 
-extern void	tcp_client_sleep2_sample(void *param);
+extern void	neuralert_app(void *param);
 extern void user_start_MQTT_client();
 extern void user_terminate_transmit();
 extern UINT8 check_mqtt_block();
@@ -104,7 +104,7 @@ const app_task_info_t    user_apps_table[] = {
   { WIFI_CONN,          user_wifi_conn,             256,    (OS_TASK_PRIORITY_USER+1),      FALSE, FALSE, UNDEF_PORT, RUN_ALL_MODE    },
   { WIFI_CONN_FAIL,     user_wifi_conn_fail,        256,    (OS_TASK_PRIORITY_USER+1),      FALSE, FALSE, UNDEF_PORT, RUN_ALL_MODE    },
   { WIFI_DISCONN,       user_wifi_disconn,          256,    (OS_TASK_PRIORITY_USER+1),      FALSE, FALSE, UNDEF_PORT, RUN_ALL_MODE    },
-  { USER_READ_DATA,	    tcp_client_sleep2_sample,   3072,   (OS_TASK_PRIORITY_USER + 3),    FALSE, FALSE, UNDEF_PORT, RUN_ALL_MODE    },
+  { USER_READ_DATA,	    neuralert_app,   3072,   (OS_TASK_PRIORITY_USER + 3),    FALSE, FALSE, UNDEF_PORT, RUN_ALL_MODE    },
 #endif  // __SUPPORT_WIFI_CONN_CB__
     { NULL,    NULL,    0, 0, FALSE, FALSE, UNDEF_PORT, 0    }
 };

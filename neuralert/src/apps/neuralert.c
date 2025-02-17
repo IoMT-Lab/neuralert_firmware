@@ -150,10 +150,7 @@
 
 // Trigger value for the accelerometer to start MQTT transmission
 //  16 ~= 1 minutes
-// 144 ~= 5 minutes
-// 176 ~= 6 minutes
-// 208 ~= 7 minutes
-// 272 ~= 9 minutes
+//  80 ~= 5 minutes
 // ***NOTE*** because the MQTT task WIFI activity appears to interfere
 // with SPI bus functions and especially the erase that happens every
 // 16 pages of FLASH writing, it is believed that having this be a
@@ -219,20 +216,6 @@
 #ifdef CFG_USE_RETMEM_WITHOUT_DPM
 
 
-typedef struct
-	{
-		__time64_t timestamp;			// assigned time of interrupt
-		int			num_samples;		// how many samples were in the FIFO
-	} AXL_calibration_data;
-
-
-/*
- * Key value used to signal when a downlink command is received
- * requesting device shutdown
- */
-#define MAGIC_SHUTDOWN_KEY 0xFACEBABE
-
-
 /*
  * User data area in retention memory
  *
@@ -241,38 +224,18 @@ typedef struct
 typedef struct userData {
 
 	// *****************************************************
-	// System state information (used to manage LEDs)
-	// *****************************************************
-	UINT32 system_state_map;		// bitmap for different system states
-
-	UINT32 ServerShutdownRequested;	// Set to a magic value when a terminate downlink is received
-
-
-
-	// *****************************************************
 	// Timekeeping for FIFO read cycles
 	// *****************************************************
 	ULONG FIFO_reads_this_power_cycle;
 	// The following variable keeps track of the most recent timestamp
 	// assigned to a FIFO buffer
 	__time64_t last_FIFO_read_time_ms;
-	// The following variable keeps track of the most recent timestamp
-	// from an actual wake from sleep.  This should be the most accurate
-	// since the MQTT task is not running when this happens
-	__time64_t last_accelerometer_wakeup_time_msec;
-	// The following keeps track of how many times we've read the AXL
-	// since we had a wakeup from sleep.  The reason is that we intend
-	// to use this as part of the basis for interpolated timekeeping for missed
-	// interrupts
-	ULONG FIFO_reads_since_last_wakeup;
-	// The following keeps track of how many actual accelerometer samples
-	// we've read since we had a wakeup from sleep.  This times the sample
-	// period tells us the expected arrival time of the sample that
-	// caused the interrupt that got us here.
-	ULONG FIFO_samples_since_last_wakeup;
 
 	// The following tracks the go-to-sleep time
 	__time64_t last_sleep_msec;
+
+	// The following records when we last owk
+	__time64_t last_wakeup_msec;
 
 
 	// *****************************************************
@@ -286,21 +249,15 @@ typedef struct userData {
 	unsigned int MQTT_stats_packets_sent_last; // the value of MQTT_stats_packets_sent the last time we checked.
 	unsigned int MQTT_stats_retry_attempts; // # times we've attempted a transmit retry
 	unsigned int MQTT_stats_transmit_success;	// # times we were successful at uploading all the data
-	unsigned int MQTT_dropped_data_events;	// # times MQTT had to skip data because it was catching up to AXL
 	unsigned int MQTT_attempts_since_tx_success;  // # times MQTT has consecutively failed to transmit
-	unsigned int MQTT_tx_attempts_remaining; // # times MQTT can attempt to send this packet
-	unsigned int MQTT_inflight_protected;			// indicates the number of inflight messages
-	int MQTT_last_message_id; // indicates the MQTT message ID (ensures uniqueness)
-
+	int MQTT_tx_attempts_remaining; // # times MQTT can attempt to send this packet
+	unsigned int MQTT_inflight;			// indicates the number of inflight messages
 
 	// Time synchronization information
 	// A time snapshot is taken on the first successful MQTT connection
 	// and provided in all subsequent transmissions in order to synchronize
-	// the left and right wrist device data streams
-	__time64_t MQTT_timesync_timestamptime_msec;// Time snapshot in milliseconds
-	__time64_t MQTT_timesync_localtime_msec;	// Corresponding local time snapshot in milliseconds
 	int16_t MQTT_timesync_captured;		// 0 if not captured; 1 otherwise
-	char MQTT_timesync_current_time_str[USERLOG_STRING_MAX_LEN];	// local time in string
+	char MQTT_timesync_current_time_str[MAX_TIMESYNC_LENGTH];	// local time in string
 
 	// *****************************************************
 	// Unique device identifier
@@ -313,7 +270,6 @@ typedef struct userData {
 	unsigned int ACCEL_read_count;			// how many FIFO reads total
 	unsigned int ACCEL_transmit_trigger;	// count of FIFOs to start transmit
 	unsigned int ACCEL_missed_interrupts;	// How many times we detected full FIFO by polling
-	//unsigned int ACCEL_log_stats_trigger;	// count of FIFOs to log stats
 	// *****************************************************
 	// External data flash (AB memory) statistics
 	// *****************************************************
@@ -740,8 +696,7 @@ void user_mqtt_pub_cb(int mid)
 		PRINTF("\n Neuralert: [%s] error taking user semaphore", __func__);
 		// do nothing, a timeout will occur and the packet will be re-transmitted
 	} else {
-		pUserData->MQTT_last_message_id = mid; // store the last message id
-		pUserData->MQTT_inflight_protected = 0; // clear the inflight message counter
+		pUserData->MQTT_inflight = 0; // clear the inflight message counter
 		xSemaphoreGive(User_semaphore);
 	}
 	vTaskDelay(1);
@@ -995,7 +950,7 @@ int send_json_packet(const int count, const unsigned int transmission, const int
 
 	int return_status = 0;
 	int i;
-	unsigned char str[80], str2[40];		// temp working strings for assembling
+	unsigned char str[MAX_TIMESYNC_LENGTH], str2[40];		// temp working strings for assembling
 	int16_t Xvalue;
 	int16_t Yvalue;
 	int16_t Zvalue;
@@ -1008,6 +963,13 @@ int send_json_packet(const int count, const unsigned int transmission, const int
 	struct tm;
 	char nowStr[20];
 	unsigned char fault_count;
+
+	// get data from memory
+	//if (take_semaphore(&User_semaphore)) {
+	//	PRINTF("\n Neuralert: [%s] error taking user semaphore");
+	//} else {
+	//
+	//}
 
 
 	/*
@@ -1635,16 +1597,7 @@ int parseDownlink(char *buf, int len)
 			PRINTF("\n Neuralert: [%s] terminate command with wrong device identifier: %s", __func__,
 					&commands[1][0]);
 		}
-		else
-		{
-			// We've been asked to shut down by the cloud server
-			// Set a flag so that it happens in an orderly way and
-			// under the control of the accelerometer task, who
-			// knows what's what
-			// We use a special value so guard against a random
-			// occurrence.
-			pUserData->ServerShutdownRequested = MAGIC_SHUTDOWN_KEY;
-		}
+
 	}
 
 	return TRUE;
@@ -1811,11 +1764,11 @@ static int user_mqtt_client_send_message_with_qos(char *top, char *publish, ULON
 	if (take_semaphore(&User_semaphore)) {
 		return -3; // couldn't get the semaphore
 	} else {
-		if (pUserData->MQTT_inflight_protected > 0){
+		if (pUserData->MQTT_inflight > 0){
 			xSemaphoreGive(User_semaphore);
 			return -1; // A message is supposedly inflight
 		}
-		pUserData->MQTT_inflight_protected = 1;
+		pUserData->MQTT_inflight = 1;
 		xSemaphoreGive(User_semaphore);
 	}
 
@@ -1828,7 +1781,7 @@ static int user_mqtt_client_send_message_with_qos(char *top, char *publish, ULON
 			if (take_semaphore(&User_semaphore)) {
 				return -3; // couldn't get the semaphore
 			} else {
-				if (pUserData->MQTT_inflight_protected == 0) {
+				if (pUserData->MQTT_inflight == 0) {
 					xSemaphoreGive(User_semaphore);
 					return 0;
 				}
@@ -1843,7 +1796,7 @@ static int user_mqtt_client_send_message_with_qos(char *top, char *publish, ULON
 		if (take_semaphore(&User_semaphore)) {
 			return -3;
 		} else {
-			pUserData->MQTT_inflight_protected = 0;
+			pUserData->MQTT_inflight = 0;
 			xSemaphoreGive(User_semaphore);
 			return -2;			/* timeout */
 		}
@@ -1854,7 +1807,7 @@ static int user_mqtt_client_send_message_with_qos(char *top, char *publish, ULON
 		if (take_semaphore(&User_semaphore)) {
 			return -3;
 		} else {
-			pUserData->MQTT_inflight_protected = 0;
+			pUserData->MQTT_inflight = 0;
 			xSemaphoreGive(User_semaphore);
 		}
 
@@ -1865,7 +1818,7 @@ static int user_mqtt_client_send_message_with_qos(char *top, char *publish, ULON
 		if (take_semaphore(&User_semaphore)) {
 			return -3;
 		} else {
-			pUserData->MQTT_inflight_protected = 0; // clear inflight, we'll kill the client next anyway
+			pUserData->MQTT_inflight = 0; // clear inflight, we'll kill the client next anyway
 			xSemaphoreGive(User_semaphore);
 		}
 
@@ -2160,6 +2113,7 @@ static void user_process_send_MQTT_data(void* arg)
 	int request_stop_transmit = pdFALSE;		// loop control for packet transmit loop
 	int request_retry_transmit = pdFALSE;
 	int transmit_complete = pdFALSE;
+	int transmit_attempts_remaining = 0;
 
 	packetDataStruct packet_data;	// struct to capture packet meta data.
 
@@ -2206,8 +2160,20 @@ static void user_process_send_MQTT_data(void* arg)
 		goto end_of_task;
 	} else {
 		transmit_start_loc = pUserData->next_AB_write_position; // start where the NEXT write will take place
-		pUserData->MQTT_inflight_protected = 0; // This is a new transmission, clear any lingering inflight issues
+		pUserData->MQTT_inflight = 0; // This is a new transmission, clear any lingering inflight issues
 		msg_transmission = ++pUserData->MQTT_transmission_number;  // Increment transmission #
+		transmit_attempts_remaining = pUserData->MQTT_tx_attempts_remaining; // store how many attempts we have left
+
+		// We are connected to WIFI and MQTT and should have wall clock
+		// time from an SNTP server
+		// On the first successful connection we take a time snapshot that
+		// will be transmitted in the "timesync" JSON field so that the
+		// end user can coordinate the left and right wrist datastreams
+		if(pUserData->MQTT_timesync_captured == 0)
+		{
+			timesync_snapshot();
+			pUserData->MQTT_timesync_captured = 1;
+		}
 
 		xSemaphoreGive(User_semaphore);
 
@@ -2244,17 +2210,6 @@ static void user_process_send_MQTT_data(void* arg)
 	//  MQTT transmission
 	// *****************************************************************
 	da16x_sys_watchdog_notify(sys_wdog_id);
-
-	// We are connected to WIFI and MQTT and should have wall clock
-	// time from an SNTP server
-	// On the first successful connection we take a time snapshot that
-	// will be transmitted in the "timesync" JSON field so that the
-	// end user can coordinate the left and right wrist datastreams
-	if(pUserData->MQTT_timesync_captured == 0)
-	{
-		timesync_snapshot();
-		pUserData->MQTT_timesync_captured = 1;
-	}
 
 	// Set up transmit loop parameters
 	packet_data.next_start_block = transmit_start_loc;
@@ -2365,24 +2320,25 @@ static void user_process_send_MQTT_data(void* arg)
 
 				vTaskDelay(5);
 			}
-			else if (pUserData->MQTT_tx_attempts_remaining > 0){
+			else if (transmit_attempts_remaining > 0){
 				PRINTF("\n Neuralert: [%s] MQTT transmission %d:%d failed. Remaining attempts %d. Retry Transmission",
-						__func__, msg_transmission, msg_sequence, pUserData->MQTT_tx_attempts_remaining);
-				pUserData->MQTT_tx_attempts_remaining--;
+						__func__, msg_transmission, msg_sequence, transmit_attempts_remaining);
+
 				request_stop_transmit = pdTRUE; // must set to true to exit loop
 				request_retry_transmit = pdTRUE;
 				if (take_semaphore(&User_semaphore)) {
 					PRINTF("\n Neuralert: [%s] error taking user semaphore", __func__);
-					//do nothing, not a critical error -- just local logging
+					//do nothing, not a critical error -- just local logging, might keep retrying
 				} else {
 					pUserData->MQTT_stats_retry_attempts++;
+					pUserData->MQTT_tx_attempts_remaining--;
 					xSemaphoreGive(User_semaphore);
 				}
 			}
 			else
 			{
 				PRINTF("\n Neuralert: [%s] MQTT transmission %d:%d failed. Remaining attempts %d. Ending Transmission",
-						__func__, msg_transmission, msg_sequence, pUserData->MQTT_tx_attempts_remaining);
+						__func__, msg_transmission, msg_sequence, transmit_attempts_remaining);
 				request_stop_transmit = pdTRUE;
 			}
 			vTaskDelay(1);
@@ -2595,13 +2551,7 @@ static void user_create_MQTT_task()
 		}
 	}
 
-
-	extern struct mosquitto	*mosq_sub;
 	BaseType_t create_status;
-
-	// Prior to starting to transmit data, we need to store the message id state
-	// so we have unique message ids for each client message
-	mosq_sub->last_mid = pUserData->MQTT_last_message_id;
 
 	create_status = xTaskCreate(
 			user_process_send_MQTT_data,
@@ -3214,15 +3164,13 @@ static int user_process_read_data(void)
 {
 	signed char rawdata[8];
 	unsigned char fiforeg[2];
-	int i;
 	int storestatus;
-	unsigned int trigger_value;
-
+	unsigned int tx_trigger_threshold = MQTT_TRANSMIT_TRIGGER_FIFO_BUFFERS_FAST;
+	unsigned int tx_trigger_value = 0;
 	uint8_t ISR_reason;
 	__time64_t assigned_timestamp;		// timestamp to assign to FIFO reading
 	ULONG ms_since_last_read;
 	int erase_happened;		// tells us if an erase sector has happened
-	int max_display;		// temp to figure out last active "try" position
 
 	// Make known to other processes that we are active
 	if (take_semaphore(&Process_semaphore)) {
@@ -3242,7 +3190,7 @@ static int user_process_read_data(void)
 	fiforeg[0] = MC36XX_REG_STATUS_1;
 	i2cRead(MC3672_ADDR, fiforeg, 1);
 
-	pUserData->FIFO_reads_this_power_cycle++;
+
 
 	// Note - need to make sure we don't read more than 32 here
 	// Note that even though the FIFO interrupt threshold is something
@@ -3276,23 +3224,28 @@ static int user_process_read_data(void)
 	// Set the number of data items in the buffer
 	receivedFIFO.num_samples = dataptr;
 	// Set an ever-increasing sequence number
+	unsigned int write_fault_count = 0;
 	if (take_semaphore(&User_semaphore)) {
 		PRINTF("\n Neuralert [%s] error taking user semaphore", __func__);
 		// this error could cause a hard fault in LmacMain when shutting down transmission.
 		// solution is to reboot the system cleanly (to be overly safe).
 		user_reboot();
 	} else {
+		pUserData->FIFO_reads_this_power_cycle++;
 		pUserData->ACCEL_read_count++; // also used in terminate transmission (other thread)
 		receivedFIFO.data_sequence = pUserData->ACCEL_read_count;
+		receivedFIFO.accelTime = assigned_timestamp;
+		receivedFIFO.accelTime_prev = pUserData->last_FIFO_read_time_ms;
+		ms_since_last_read = assigned_timestamp - pUserData->last_FIFO_read_time_ms;
+		pUserData->last_FIFO_read_time_ms = assigned_timestamp;
+		write_fault_count = pUserData->write_fault_count;
 		xSemaphoreGive(User_semaphore);
-	}
-	receivedFIFO.accelTime = assigned_timestamp;
-	receivedFIFO.accelTime_prev = pUserData->last_FIFO_read_time_ms;
 
-	ms_since_last_read = assigned_timestamp - pUserData->last_FIFO_read_time_ms;
-	pUserData->last_FIFO_read_time_ms = assigned_timestamp;
-	PRINTF("\n Milliseconds since last AXL read: %u", ms_since_last_read);
-	PRINTF("\n FIFO samples read: %d", dataptr);
+		PRINTF("\n Milliseconds since last AXL read: %u", ms_since_last_read);
+		PRINTF("\n FIFO samples read: %d", dataptr);
+	}
+
+
 
 	// *****************************************************
 	// Store the FIFO data structure into nonvol memory
@@ -3305,7 +3258,7 @@ static int user_process_read_data(void)
 	if(storestatus != pdTRUE)
 	{
 		PRINTF("\n Neuralert: [%s] UNABLE TO WRITE DATA TO FLASH", __func__);
-		PRINTF("\n Neuralert: [%s] FAULT COUNT: %d", __func__, pUserData->write_fault_count);
+		PRINTF("\n Neuralert: [%s] FAULT COUNT: %d", __func__, write_fault_count);
 	}
 	if(erase_happened)
 	{
@@ -3316,86 +3269,39 @@ static int user_process_read_data(void)
 		PRINTF("\n Neuralert [%s] error taking user semaphore", __func__);
 		// do nothing, just logging display
 	} else {
+		PRINTF("\n -------------------------------------------------\n");
 		PRINTF(" Total FIFO blocks read since power on   : %d\n", pUserData->ACCEL_read_count);
-		xSemaphoreGive(User_semaphore);
-	}
-	PRINTF(" Total FIFO write failures since power on: %d\n", pUserData->write_fault_count);
-	PRINTF(" Total times a write retry was needed    : %d\n", pUserData->write_retry_count);
-	PRINTF(" Total missed accelerometer interrupts   : %d\n", pUserData->ACCEL_missed_interrupts);
-	max_display = AB_WRITE_MAX_ATTEMPTS - 1;
-	while (max_display > 0 &&
-			 pUserData->write_attempt_events[max_display] == 0)
-	{
-		max_display--;
-	}
-//	for (i=0; i<AB_WRITE_MAX_ATTEMPTS; i++)
-	if(max_display > 0)
-	{
-		for (i=0; i<=max_display; i++)
-		{
-			PRINTF(" Total times succeeded on try %d          : %d\n", (i+1), pUserData->write_attempt_events[i]);
-		}
-	}
-		PRINTF(" Total sector erase events               : %d\n", pUserData->erase_attempts);
-	if(pUserData->erase_retry_count > 0)
-	{
-		PRINTF(" Total times an erase retry was needed   : %d\n", pUserData->erase_retry_count);
-	}
-		max_display = AB_ERASE_MAX_ATTEMPTS - 1;
-	while (max_display > 0 &&
-			 pUserData->erase_attempt_events[max_display] == 0)
-	{
-		max_display--;
-	}
-//	for (i=0; i<AB_ERASE_MAX_ATTEMPTS; i++)
-	if(max_display > 0)
-	{
-		for (i=0; i<=max_display; i++)
-		{
-			PRINTF(" Total times succeeded on try %d          : %d\n", (i+1), pUserData->erase_attempt_events[i]);
-		}
-	}
-
-	PRINTF("\n----------------------------------------\n");
-	if (take_semaphore(&User_semaphore)) {
-		PRINTF("\n Neuralert [%s] error taking stats semaphore", __func__);
-	} else {
-
-		/* We were able to obtain the semaphore and can now access the shared resource. */
+		PRINTF(" Total FIFO write failures since power on: %d\n", pUserData->write_fault_count);
+		PRINTF(" Total times a write retry was needed    : %d\n", pUserData->write_retry_count);
+		PRINTF(" Total missed accelerometer interrupts   : %d\n", pUserData->ACCEL_missed_interrupts);
+		PRINTF("-------------------------------------------------\n");
 		PRINTF(" Total MQTT connect attempts             : %d\n", pUserData->MQTT_stats_connect_attempts);
 		PRINTF(" Total MQTT connect fails                : %d\n", pUserData->MQTT_stats_connect_fails);
 		PRINTF(" Total MQTT packets sent                 : %d\n", pUserData->MQTT_stats_packets_sent);
 		PRINTF(" Total MQTT retry attempts               : %d\n", pUserData->MQTT_stats_retry_attempts);
 		PRINTF(" Total MQTT transmit success             : %d\n", pUserData->MQTT_stats_transmit_success);
 		PRINTF(" MQTT tx attempts since tx success       : %d\n", pUserData->MQTT_attempts_since_tx_success);
-
-		xSemaphoreGive( User_semaphore );
-	}
-	PRINTF(" ----------------------------------------\n");
+		PRINTF(" ------------------------------------------------\n");
 
 
-	// See if it's time to transmit data, based on how many FIFO buffers we've
-	// accumulated since the last transmission
-	++pUserData->ACCEL_transmit_trigger;  // Increment FIFO stored
+		// See if it's time to transmit data, based on how many FIFO buffers we've
+		// accumulated since the last transmission
+		tx_trigger_value = ++pUserData->ACCEL_transmit_trigger;  // Increment FIFO stored counter
 
-	// Determine the mqtt transmit trigger
-	if (take_semaphore(&User_semaphore)) {
-		PRINTF("\n Neuralert [%s] error taking user semaphore", __func__);
-		trigger_value = MQTT_TRANSMIT_TRIGGER_FIFO_BUFFERS_FAST; // set to fast (just because)
-	} else {
-		// determine whether to use the fast or slow tx mode.
 		if (pUserData->MQTT_attempts_since_tx_success <= MQTT_TRANSMIT_TRIGGER_FIFO_BUFFERS_TEST) {
-			trigger_value = MQTT_TRANSMIT_TRIGGER_FIFO_BUFFERS_FAST;
+			tx_trigger_threshold = MQTT_TRANSMIT_TRIGGER_FIFO_BUFFERS_FAST;
 		} else {
-			trigger_value = MQTT_TRANSMIT_TRIGGER_FIFO_BUFFERS_SLOW;
+			tx_trigger_threshold = MQTT_TRANSMIT_TRIGGER_FIFO_BUFFERS_SLOW;
 		}
+
 		xSemaphoreGive(User_semaphore);
 	}
 
-	PRINTF(" ACCEL transmit trigger: %d of %d\n",
-			pUserData->ACCEL_transmit_trigger, trigger_value);
+	PRINTF(" ACCEL transmit trigger: %d of %d\n", tx_trigger_value, tx_trigger_threshold);
+
+
 	//mqtt_started = pdFALSE;
-	if(pUserData->ACCEL_transmit_trigger >= trigger_value)
+	if(tx_trigger_value >= tx_trigger_threshold)
 	{
 
 		// increment MQTT attempt since tx success counter (we're going to try a transmission)
@@ -3414,45 +3320,47 @@ static int user_process_read_data(void)
 		if (take_semaphore(&Process_semaphore)) {
 			PRINTF("\n Neuralert [%s] error taking process semaphore", __func__);
 			user_reboot();
-			return 0;
 		} else {
 			val = BIT_SET(processLists, USER_PROCESS_MQTT_TRANSMIT);
 			xSemaphoreGive(Process_semaphore);
 		}
 
 		if (val) {
-			// get number of packets sent (safely)
-			unsigned int packets_sent = pUserData->MQTT_stats_packets_sent_last; // initialize to last known value
+			// MQTT is still active. check if we're making progress -- if not, stop the transmission
 			if (take_semaphore(&User_semaphore)) {
 				PRINTF("\n Neuralert: [%s] error taking user semaphore", __func__);
 				// do nothing, this will trigger a transmission termination event below, which is fine.
 			} else {
-				packets_sent = pUserData->MQTT_stats_packets_sent;
+				pUserData->ACCEL_transmit_trigger = 0; // reset the transmit trigger value
+				unsigned int packets_sent = pUserData->MQTT_stats_packets_sent;
+				if (packets_sent > pUserData->MQTT_stats_packets_sent_last) {
+					pUserData->MQTT_stats_packets_sent_last = packets_sent; //
+				} else {
+					PRINTF("\n MQTT task still active and not making progress. Stopping transmission.");
+					xSemaphoreGive(User_semaphore);
+					user_terminate_transmit();
+				}
 				xSemaphoreGive(User_semaphore);
 			}
-
-			if (packets_sent > pUserData->MQTT_stats_packets_sent_last) {
-				pUserData->MQTT_stats_packets_sent_last = packets_sent; //
-			} else {
-				PRINTF("\n MQTT task still active and not making progress. Stopping transmission.");
-				user_terminate_transmit();
-			}
-
 		} else {
 			// Send the event that will start the MQTT transmit task
-			pUserData->MQTT_stats_connect_attempts++;
-			user_start_data_tx();
-		}
+			if (take_semaphore(&User_semaphore)) {
+				PRINTF("\n Neuralert: [%s] error taking user semaphore", __func__);
+				// do nothing (try again next time)
+			} else {
+				pUserData->ACCEL_transmit_trigger = 0;
+				pUserData->MQTT_stats_connect_attempts++;
+				xSemaphoreGive(User_semaphore);
 
-
-		// Reset our transmit trigger counter
-		pUserData->ACCEL_transmit_trigger = 0;
-	}
+				user_start_data_tx(); // potentially needs the user semaphore
+			}
+		} // MQTT still active or not
+	} // trigger value above threshold
 
 	// Signal that we're finished so we can sleep
 	if (take_semaphore(&Process_semaphore)) {
 		PRINTF("\n Neuralert [%s] error taking process semaphore", __func__);
-		user_reboot();
+		// do nothing, the result will be the system doesn't go to sleep and try again next RTCKEY
 	} else {
 		CLR_BIT(processLists, USER_PROCESS_HANDLE_RTCKEY);
 		xSemaphoreGive(Process_semaphore);
@@ -3495,20 +3403,21 @@ void user_initialize_accelerometer(void)
 		i2cRead(MC3672_ADDR, fiforeg, 1);
 		i++;
 	}
-	// Assign the initial timestamp.
-	user_time64_msec_since_poweron(&(pUserData->last_FIFO_read_time_ms));
-
 	PRINTF("\n Neuralert: [%s] FIFO buffer emptied %d samples", __func__, i);
 
-	//Enable RTC ISR - NJ 6/30/2022
-	// Note that in original SDK this interrupt was enabled earlier.
-	// See function config_ext_wakeup_resource();
-	PRINTF("\n Neuralert: [%s] enabling accelerometer interrupt", __func__);
+	// Assign the initial timestamp.
+	if (take_semaphore(&User_semaphore)) {
+		PRINTF("\n Neuralert: [%s] error taking user semaphore");
+		// do nothing, just internal logging
+	} else {
+		user_time64_msec_since_poweron(&(pUserData->last_FIFO_read_time_ms));
+		xSemaphoreGive(User_semaphore);
+	}
 
 	// Clear any accelerometer interrupt that might be pending
 	clear_intstate(&ISR_reason);
 
-	//This seems to initialize the wake-up controller - JW
+	//This seems to initialize the wake-up controller in the current sdk
 	RTC_IOCTL(RTC_GET_RTC_CONTROL_REG, &intr_src);
 	intr_src |= WAKEUP_INTERRUPT_ENABLE(1);
 	RTC_IOCTL(RTC_SET_RTC_CONTROL_REG, &intr_src);
@@ -3619,10 +3528,7 @@ static int user_process_bootup_event(void)
 		pUserData->MQTT_transmission_number = 0;
 		pUserData->MQTT_pub_msg_id = 0;
 		pUserData->MQTT_stats_packets_sent_last = 0;
-		pUserData->MQTT_inflight_protected = 0;
-
-		pUserData->MQTT_dropped_data_events = 0;
-		pUserData->MQTT_last_message_id = 0;
+		pUserData->MQTT_inflight = 0;
 
 		xSemaphoreGive(User_semaphore);
 	}
@@ -3655,17 +3561,11 @@ static int user_process_bootup_event(void)
  */
 static UCHAR user_process_event(UINT32 event)
 {
-	__time64_t awake_time;
+	__time64_t awake_time = 0;
+	__time64_t since_last_sleep = 0;
 	__time64_t current_msec_since_boot;
-	UCHAR time_string[20];
-
-	user_time64_msec_since_poweron(&current_msec_since_boot);
-	awake_time = current_msec_since_boot - pUserData->last_sleep_msec;
-	time64_string (time_string, &awake_time);
-	//			time64_string (time_string, &pUserData->last_sleep_msec);
 
 	PRINTF("%s: Event: [%d]\n", __func__, event);
-
 
 	// Power-on boot
 	// This is only expected to happen once when the device is
@@ -3686,7 +3586,16 @@ static UCHAR user_process_event(UINT32 event)
 
 	// Wakened from low-power sleep by accelerometer interrupt
 	if (event & USER_WAKEUP_BY_RTCKEY_EVENT) {
-		PRINTF("**%s: Wake by RTCKEY event\n", __func__); // FRSDEBUG
+		PRINTF("\n Wake by RTCKEY event");
+
+		// log the time we woke up (close enough to accurate -- just for logging)
+		if (take_semaphore(&User_semaphore)) {
+			PRINTF("\n Neuralert: [%s] error taking user semaphore");
+			// do nothing, just logging
+		} else {
+			user_time64_msec_since_poweron(&(pUserData->last_wakeup_msec));
+			xSemaphoreGive(User_semaphore);
+		}
 
 		isAccelerometerWakeup = pdTRUE;	// tell accelerometer why it's awake
 
@@ -3703,7 +3612,7 @@ static UCHAR user_process_event(UINT32 event)
 	}
 
 
-	// This event occurs when we detect a missed accelerometer interrupt (FIFO at threshold)
+	// This event occurs when a missed accelerometer interrupt is detected (FIFO at threshold)
 	if (event & USER_MISSED_RTCKEY_EVENT) {
 		PRINTF("** %s RTCKEY in TIMER event\n", __func__); // FRSDEBUG
 
@@ -3728,24 +3637,41 @@ static UCHAR user_process_event(UINT32 event)
 		PRINTF("USER_SLEEP_READY_EVENT: processLists: 0x%x\n", val);
 		if (val == 0) {
 
-			PRINTF("Entering sleep1. msec since last sleep %s \n\n", time_string);
-			vTaskDelay(5);
+			user_time64_msec_since_poweron(&current_msec_since_boot);
 
-			// Get relative time since power on from the RTC time counter register
-			user_time64_msec_since_poweron(&pUserData->last_sleep_msec);
+			if (take_semaphore(&User_semaphore)) {
+				PRINTF("\n Neuralert: [%s] error taking user semaphore");
+				// do nothing, just internal logging
+			} else {
+				// Get relative time since power on from the RTC time counter register
+				awake_time = current_msec_since_boot - pUserData->last_wakeup_msec;
+				since_last_sleep = current_msec_since_boot - pUserData->last_sleep_msec;
+				PRINTF("\n Entering sleep1. msec awake %u, msec since last sleep %u \n\n", awake_time, since_last_sleep);
+				user_time64_msec_since_poweron(&(pUserData->last_sleep_msec));
+				xSemaphoreGive(User_semaphore);
+			}
+			vTaskDelay(5); // delay to let everything settle down before sleep 1
 
-			extern void fc80211_da16x_pri_pwr_down(unsigned char retention); //JW: This is probably the correct implemenation
+			// enter into sleep 1
+			extern void fc80211_da16x_pri_pwr_down(unsigned char retention);
 			fc80211_da16x_pri_pwr_down(TRUE);
 		}
 		else
 		{
 			user_time64_msec_since_poweron(&current_msec_since_boot);
-			awake_time = current_msec_since_boot - pUserData->last_sleep_msec;
-			PRINTF("%s: Unable to sleep. Awake %u msec\n", __func__, awake_time);
+
+			if (take_semaphore(&User_semaphore)) {
+				PRINTF("\n Neuralert: [%s] error taking user semaphore");
+				PRINTF("\n Unable to sleep. \n", __func__);
+				// do nothing, just used for logging
+			} else {
+				awake_time = current_msec_since_boot - pUserData->last_wakeup_msec;
+				since_last_sleep = current_msec_since_boot - pUserData->last_sleep_msec;
+				xSemaphoreGive(User_semaphore);
+				PRINTF("\n Unable to sleep. msec awake %u, msec since last sleep %u \n\n", awake_time, since_last_sleep);
+			}
 		}
 	}
-
-
 
 	/* Continue in process */
 	return PROCESS_EVENT_CONTINUE;
@@ -3890,13 +3816,16 @@ static void user_init(void)
 
 
 		// Initialize the FIFO interrupt cycle statistics
-		pUserData->FIFO_reads_this_power_cycle = 0;
+		if (take_semaphore(&User_semaphore)) {
+			PRINTF("\n Neuralert [%s] error taking user semaphore");
+			// do nothing, it is just a variable used for local accounting and doesn't affect functionality
+		} else {
+			pUserData->FIFO_reads_this_power_cycle = 0;
+			xSemaphoreGive(User_semaphore);
+		}
 
-		/*
-		 * Clear the shutdown-requested-by-server flag.  To request
-		 * a shutdown, it has to be set to a magic value
-		 */
-		pUserData->ServerShutdownRequested = 0;
+
+
 
 
 		/*
@@ -3954,7 +3883,7 @@ static void user_reboot(void)
 
 
 
-void tcp_client_sleep2_sample(void *param)
+void neuralert_app(void *param)
 {
 	DA16X_UNUSED_ARG(param);
 
@@ -3972,7 +3901,7 @@ void tcp_client_sleep2_sample(void *param)
 	/* Get our task handle */
 	xTask = xTaskGetCurrentTaskHandle();
 
-	PRINTF("\n\n===========>Starting tcp_client_sleep2_sample\r\n");
+	PRINTF("\n\n===========>Starting neuralert_app\r\n");
 	PRINTF(" Software part number  :    %s\n", USER_SOFTWARE_PART_NUMBER_STRING);
 	PRINTF(" Software version      :    %s\n", USER_VERSION_STRING);
 	PRINTF(" Software build time   : %s %s\n", __DATE__ , __TIME__ );
@@ -4078,10 +4007,8 @@ void tcp_client_sleep2_sample(void *param)
 								0x00,               /* Don't clear any notification bits on entry. */
 								ULONG_MAX,          /* Reset the notification value to 0 on exit. */
 								&ulNotifiedValue,   /* Notified value pass out in ulNotifiedValue. */
-//								pdMS_TO_TICKS(250));   /* Timeout if no event to check on AXL. */
-//								pdMS_TO_TICKS(25));   /* Timeout if no event to check on AXL. */ //RTOS must check at half the sampling rate of accelerometer
-								pdMS_TO_TICKS(50));   /* Timeout if no event to check on AXL. */ //RTOS must check at half the sampling rate of accelerometer
-//								portMAX_DELAY);     /* Block indefinitely. */
+								pdMS_TO_TICKS(50));   /* Timeout if no event to check on AXL - twice rate of AXL sampling rate. */
+
 
 		//PRINTF("%s: NotifiedValue: 0x%X\n", __func__, ulNotifiedValue);
 		PRINTF(".");   // Show [.......] for wait loop
@@ -4092,7 +4019,7 @@ void tcp_client_sleep2_sample(void *param)
 			PRINTF("]\n");
 
 			// If we've received a terminate downlink command, exit
-			// the message processing loop and effectively shut down.
+			// message processing loop and effectively shut down.
 			da16x_sys_watchdog_notify(sys_wdog_id);
 			//quit = (user_process_event(ulNotifiedValue) == PROCESS_EVENT_TERMINATE); //JW: no more terminate event
 			user_process_event(ulNotifiedValue);
@@ -4102,14 +4029,21 @@ void tcp_client_sleep2_sample(void *param)
 			// Timeout on event loop - check to see if the AXL is stalled
 			fiforeg[0] = MC36XX_REG_STATUS_1;
 			i2cRead(MC3672_ADDR, fiforeg, 1);
-			// if the AXL threshold has been reached but we didn't get the
+			// if the AXL threshold has been reached but we did not get the
 			// notification, fire off our own notification
 			if(fiforeg[0] & 0x40)
 			{
 				// Mark the time when we noticed this
 				// in RTC ticks
 				user_AXL_poll_detect_RTC_clock = RTC_GET_COUNTER();
-				pUserData->ACCEL_missed_interrupts++;
+				if (take_semaphore(&User_semaphore)) {
+					PRINTF("\n Neuralert: [%s] error taking user semaphore");
+					// do nothing, it just internal logging
+				} else {
+					pUserData->ACCEL_missed_interrupts++;
+					xSemaphoreGive(User_semaphore);
+				}
+
 				PRINTF("]\n");
 				PRINTF("%s: AXL FIFO at threshold! [%x]\n", __func__, fiforeg[0]);
 				if (xTask) {
