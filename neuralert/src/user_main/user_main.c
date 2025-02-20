@@ -214,7 +214,7 @@ int user_main(char init_state)
 #endif // __REMOVE_32KHZ_CRYSTAL__
 
     time_old = RTC_GET_COUNTER();
-	
+
     /* Entry point for customer main */
     if (init_state == pdTRUE) {
         system_start();
