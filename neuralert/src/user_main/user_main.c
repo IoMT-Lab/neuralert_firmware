@@ -215,15 +215,6 @@ int user_main(char init_state)
 
     time_old = RTC_GET_COUNTER();
 
-	// Save time of interrupt for use as timestamp in user application
-//	da16x_time64_msec(NULL, &my_wakeup_msec);
-//	Printf("\nuser_main: wakeup msec: %u\n\n", my_wakeup_msec);
-//	user_rtc_wakeup_time = time_old;	// publish interrupt time to user
-//	user_rtc_wakeup_time_msec = my_wakeup_msec;
-
-	// Get relative time since power on from the RTC time counter register
-	user_time64_msec_since_poweron(&user_raw_rtc_wakeup_time_msec);
-
     /* Entry point for customer main */
     if (init_state == pdTRUE) {
         system_start();

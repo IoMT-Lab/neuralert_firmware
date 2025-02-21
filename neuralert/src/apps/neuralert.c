@@ -79,8 +79,7 @@
 #define USER_MISSED_RTCKEY_EVENT				(1 << 3)
 #define USER_ATTEMPT_TRANSMIT_EVENT				(1 << 4)
 #define USER_WIFI_CONNECT_COMPLETE_EVENT		(1 << 5)
-#define USER_MQTT_CONNECT_COMPLETE_EVENT		(1 << 6)
-#define USER_SLEEP_READY_EVENT					(1 << 7)
+#define USER_SLEEP_READY_EVENT					(1 << 6)
 
 /* Process list */
 #define USER_PROCESS_HANDLE_RTCKEY				(1 << 0)
@@ -383,7 +382,17 @@ static UserDataBuffer *pUserData = NULL;
 #define CLR_SYSTEM_STATE_BIT(bit)		(pUserData->system_state_map &= (~bit))
 #define BIT_SYSTEM_STATE_SET(bit)		((pUserData->system_state_map & bit) == bit)
 
+// Macros for converting from RTC clock ticks (msec * 32768) to microseconds
+// and milliseconds
+#define CLK2US(clk)			((((unsigned long long )clk) * 15625ULL) >> 9ULL)
+#define CLK2MS(clk)			((CLK2US(clk))/1000ULL)
 
+
+/*
+ * Application Program Interface
+ *******************************************************************************
+ */
+void user_start_MQTT_client(); // used to start the MQTT client from user_apps.c
 
 
 /*
@@ -391,34 +400,32 @@ static UserDataBuffer *pUserData = NULL;
  *******************************************************************************
  */
 static int clear_AB_position(int, int);
-void user_start_MQTT_client();
-UINT8 system_state_bootup(void);
 static void user_create_MQTT_task(void);
 static void user_create_MQTT_stop_task(void);
 static int user_mqtt_send_message(void);
-void user_mqtt_connection_complete_event(void);
 static int take_semaphore(SemaphoreHandle_t *);
 static void timesync_snapshot(void);
 static void user_reboot(void);
 
 
-// Macros for converting from RTC clock ticks (msec * 32768) to microseconds
-// and milliseconds
-#define CLK2US(clk)			((((unsigned long long )clk) * 15625ULL) >> 9ULL)
-#define CLK2MS(clk)			((CLK2US(clk))/1000ULL)
-
 /*
  * EXTERN FUNCTIONS DEFINITIONS
  *******************************************************************************
  */
-
+extern void da16x_time64_sec(__time64_t *p, __time64_t *cur_sec);
+extern void start_LED_timer(); //TODO: remove this?
+extern unsigned char get_fault_count(void);
 extern void system_control_wlan_enable(uint8_t onoff);
 extern int fc80211_set_app_keepalivetime(unsigned char tid, unsigned int sec,
 										void (*callback_func)(unsigned int tid));
-void da16x_time64_sec(__time64_t *p, __time64_t *cur_sec);
-void da16x_time64_msec(__time64_t *p, __time64_t *cur_msec);
 
-void user_time64_msec_since_poweron(__time64_t *cur_msec) {
+
+/**
+ *******************************************************************************
+ * @brief Function to get the milliseconds since power on
+ *******************************************************************************
+ */
+static void user_time64_msec_since_poweron(__time64_t *cur_msec) {
 	unsigned long long time_ms;
 	unsigned long long rtc;
 
@@ -428,37 +435,6 @@ void user_time64_msec_since_poweron(__time64_t *cur_msec) {
 
 	*cur_msec = time_ms; /* msec */
 }
-
-extern int get_gpio(UINT);
-extern unsigned char get_fault_count(void);
-extern void clr_fault_count();
-
-// SDK MQTT function to set up received messages
-//void mqtt_client_set_msg_cb(void (*user_cb)(const char *buf, int len, const char *topic));
-
-
-// When an accelerometer interrupt occurs and we're still awake,
-// the interrupt takes this snapshot of the RTC clock
-// so we know when it happened.  Processing will happen later,
-// after the event works its way through the event processor
-// and whatever other delays occur
-
-long long user_accelerometer_interrupt_time; // RTC clock when interrupt happened
-__time64_t user_accelerometer_interrupt_msec;  // msec since boot when interrupt happened
-
-// Timekeeping for the polled accelerometer FIFO full detection
-// (this is the workaround for missed accelerometer interrupts when
-//  the MQTT task is active or the network is otherwise doing something)
-//
-__time64_t  user_AXL_poll_detect_RTC_clock;  // msec since boot when poll saw FIFO full
-__time64_t  user_lower_AXL_poll_detect_RTC_clock;  // msec since boot when poll was negative
-__time64_t  user_MQTT_end_msec;  // msec since boot when task ended
-ULONG user_MQTT_task_time_msec;   // run time msec
-
-
-
-// LED timer and control functions
-extern void start_LED_timer();
 
 
 /**
@@ -826,18 +802,6 @@ void user_wifi_connection_complete_event(void)
 	}
 }
 
-
-/**
- *******************************************************************************
- * @brief Send MQTT connection event
- *******************************************************************************
- */
-void user_mqtt_connection_complete_event(void)
-{
-	if (xTask) {
-		xTaskNotifyIndexed(xTask, 0, USER_MQTT_CONNECT_COMPLETE_EVENT, eSetBits);
-	}
-}
 
 
 /**
@@ -3181,7 +3145,7 @@ static void timesync_snapshot(void)
 	user_time64_msec_since_poweron(&time_since_power_on);
 	time64_string(buf2, &time_since_power_on);
 
-	// Get current local time in milliseconds and seconds
+	// Get current local time in seconds
 	da16x_time64_sec(NULL, &cur_sec);
 
 	// Convert to date and time
@@ -3990,18 +3954,27 @@ void neuralert_app(void *param)
 
 		// Allow time for console to settle
 		vTaskDelay(pdMS_TO_TICKS(100));
-		PRINTF("\n\n******** Waiting for run flag to be set ********\n\n"); 	}
-		while (TRUE)
+		PRINTF("\n\n******** Waiting for run flag to be set to 1 ********\n\n");
+	} else if (runFlag == 2) {
+		setLEDState(RED, LED_SLOW, 200, 0, LED_OFFX, 0, 3600);
+
+		// Allow time for console to settle
+		vTaskDelay(pdMS_TO_TICKS(100));
+		PRINTF("\n\n******** Starting provisioning script ********\n\n");
+	}
+
+
+	while (TRUE)
+	{
+		if(runFlag )
 		{
-			if(runFlag )
-			{
-				break;
-			}
-
-
-			da16x_sys_watchdog_notify(sys_wdog_id);
-			vTaskDelay(pdMS_TO_TICKS(100));
+			break;
 		}
+
+
+		da16x_sys_watchdog_notify(sys_wdog_id);
+		vTaskDelay(pdMS_TO_TICKS(100));
+	}
 
 	/*
 	 * Initialize resources and kick off initial event,
@@ -4085,9 +4058,6 @@ void neuralert_app(void *param)
 			// notification, fire off our own notification
 			if(fiforeg[0] & 0x40)
 			{
-				// Mark the time when we noticed this
-				// in RTC ticks
-				user_AXL_poll_detect_RTC_clock = RTC_GET_COUNTER();
 				if (take_semaphore(&User_semaphore)) {
 					PRINTF("\n Neuralert: [%s] error taking user semaphore");
 					// do nothing, it just internal logging
@@ -4102,17 +4072,6 @@ void neuralert_app(void *param)
 					xTaskNotifyIndexed(xTask, 0, USER_MISSED_RTCKEY_EVENT, eSetBits);
 					isAccelerometerTimeout = pdTRUE;	// remember why we are reading accelerometer				}
 				}
-			}
-			else
-			{
-				// Mark the time when we last knew that the FIFO wasn't full
-				// The theory here is that this will mostly be happening
-				// when the MQTT task is active and we are missing interrupts
-				// The event loop will timeout regularly and we will check the
-				// FIFO buffer and see that it's not full.  We mark the time
-				// when we checked so that when the FIFO becomes full, we can
-				// use this timestamp to establish a lower bound
-				user_lower_AXL_poll_detect_RTC_clock = RTC_GET_COUNTER();
 			}
 		} // event wait timeout
 	} // while (1)
