@@ -3954,18 +3954,27 @@ void neuralert_app(void *param)
 
 		// Allow time for console to settle
 		vTaskDelay(pdMS_TO_TICKS(100));
-		PRINTF("\n\n******** Waiting for run flag to be set ********\n\n"); 	}
-		while (TRUE)
+		PRINTF("\n\n******** Waiting for run flag to be set to 1 ********\n\n");
+	} else if (runFlag == 2) {
+		setLEDState(RED, LED_SLOW, 200, 0, LED_OFFX, 0, 3600);
+
+		// Allow time for console to settle
+		vTaskDelay(pdMS_TO_TICKS(100));
+		PRINTF("\n\n******** Starting provisioning script ********\n\n");
+	}
+
+
+	while (TRUE)
+	{
+		if(runFlag )
 		{
-			if(runFlag )
-			{
-				break;
-			}
-
-
-			da16x_sys_watchdog_notify(sys_wdog_id);
-			vTaskDelay(pdMS_TO_TICKS(100));
+			break;
 		}
+
+
+		da16x_sys_watchdog_notify(sys_wdog_id);
+		vTaskDelay(pdMS_TO_TICKS(100));
+	}
 
 	/*
 	 * Initialize resources and kick off initial event,

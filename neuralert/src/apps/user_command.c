@@ -48,7 +48,7 @@
 #include "adc.h"
 #include "Mc363x.h" //JW: The x was the wrong case previously.
 #include "user_nvram_cmd_table.h"
-#include "W25QXX.h"
+
 
 /* globals */
 // Timers for controlling the LED blink
@@ -131,12 +131,12 @@ const COMMAND_TREE_TYPE	cmd_user_list[] = {
 const COMMAND_TREE_TYPE	cmd_user_list[] = {
 	{ "user",			CMD_MY_NODE,	cmd_user_list,	NULL,							"User cmd "	},
 	{ "-------",		CMD_FUNC_NODE,	NULL,			NULL,							"--------------------------------"	},
-	{ "run",			CMD_FUNC_NODE,	NULL,			&cmd_run,						"run [0/1]"					},
+	{ "testcmd",		CMD_FUNC_NODE,  NULL,          &cmd_test,						"testcmd [option]"                 },
+	{ "run",			CMD_FUNC_NODE,	NULL,			&cmd_run,						"run [0/1/2]"					},
     { "-------",     	CMD_FUNC_NODE,  NULL,          	NULL,             				"--------------------------------" },
 #if defined(__COAP_CLIENT_SAMPLE__)
     { "coap_client", CMD_FUNC_NODE,  NULL,          &cmd_coap_client, "CoAP Client"                      },
 #endif /* __COAP_CLIENT_SAMPLE__ */
-	{ "utxpwr",      CMD_FUNC_NODE,  NULL,          &cmd_txpwr,       "testcmd [option]"                 },
 
 #if !defined (__BLE_COMBO_REF__)
 	////////////////////  APPS Test command  ////////////////////////////////
@@ -179,15 +179,6 @@ int freq_to_channel(unsigned char band, unsigned short freq)
     // 5 GHz
     else if (band == 1) {
         assert(0);
-
-        // Check if frequency is in the expected range
-        if ((freq < 5005) || (freq > 5825)) {
-            PRINTF("Wrong channel\n");
-            return (channel);
-        }
-
-        // Compute the channel number
-        channel = (freq - 5000) / 5;
     }
 
     return (channel);
@@ -217,82 +208,6 @@ int get_current_freq_ch(void)
 
 
 
-void cmd_txpwr(int argc, char *argv[])
-{    
-    int i;
-    int channel, pwr_mode, power, power_dsss;
-
-    if (argc != 30) {
-        goto error;
-    }
-
-    pwr_mode = (int)ctoi(argv[1]);
-    PRINTF("TX PWR : [%s] ", (pwr_mode)?"AP":"STA");
-    PRINTF("\n OFDM \n");
-    for (i = 0; i < 14; i++) {
-        user_power_level[i] = (UCHAR)htoi(argv[i + 2]);
-
-        if (user_power_level[i] > 0x0f) {
-            PRINTF("..................\n");
-            goto error;
-        } else {
-            PRINTF("CH%02d[0x%x] ", i + 1, user_power_level[i]);
-        }
-
-        if (i == 6)
-            PRINTF("\n");
-    }
-
-    PRINTF("\n DSSS \n");
-    for (i = 14; i < 28; i++) {
-        user_power_level_dsss[i - 14] = (UCHAR)htoi(argv[i + 2]);
-
-        if (user_power_level_dsss[i - 14] > 0x0f) {
-            PRINTF("..................\n");
-            goto error;
-        } else {
-            PRINTF("CH%02d[0x%x] ", i + 1, user_power_level_dsss[i - 14]);
-        }
-
-        if (i == 20)
-            PRINTF("\n");
-    }
-
-    PRINTF("\n");
-    channel = get_current_freq_ch();
-    power = user_power_level[channel-1];
-    power_dsss = user_power_level_dsss[channel-1];
-
-    fc80211_set_tx_power_table(pwr_mode, (unsigned int *)&user_power_level, (unsigned int *)&user_power_level_dsss);
-    fc80211_set_tx_power_grade_idx(pwr_mode, power, power_dsss);
-
-    PRINTF("TX PWR set channel[%d], pwr [0x%x]\n", channel, power);
-
-    return;
-
-
-error:
-    PRINTF("\n\tUsage : utxpwr mode [CH1 CH2 ... CH13 CH14] [CH1 CH2 ... CH13 CH14 [DSSS]]\n");
-    PRINTF("\t\tCH    0~f\n");
-    PRINTF("\t\tex) utxpwr 0 1 1 1 1 1 1 1 1 1 1 1 f f f 2 3 3 3 3 3 3 3 3 3 1 f f f\n");
-
-    return;
-}
-
-#if defined(__COAP_CLIENT_SAMPLE__)
-void cmd_coap_client(int argc, char *argv[])
-{
-    extern void coap_client_sample_cmd(int argc, char *argv[]);
-
-    coap_client_sample_cmd(argc, argv);
-
-    return;
-}
-#endif /* __COAP_CLIENT_SAMPLE__ */
-
-
-
-
 /*
  * Set one LED to a state
  */
@@ -304,7 +219,6 @@ void setLEDState(uint8_t number1, 	// color A
 				uint16_t count2, 	// probably 1/8ths duration in state B
 				uint16_t secondsTotal)  // length of time to do this
 {
-	UINT32	ioctldata[3];
 
 	/* ledColor is color
 	 * 000-black
@@ -326,14 +240,14 @@ void setLEDState(uint8_t number1, 	// color A
 	/* set combine 3 leds for color */
 	ledColor.color1 = number1;
 	ledColor.state1 = state1;
-	ledColor.count1 = count1;
-	ledColor.countReload1 = count1;
+	ledColor.count1 = (int16_t)count1;
+	ledColor.countReload1 = (int16_t)count1;
 	ledColor.color2 = number2;
 	ledColor.state2 = state2;
-	ledColor.count2 = count2;
-	ledColor.countReload2 = count2;
+	ledColor.count2 = (int16_t)count2;
+	ledColor.countReload2 = (int16_t)count2;
 	ledColor.inProgress = 0;
-	ledColor.secondsTotal = secondsTotal;
+	ledColor.secondsTotal = (int16_t)secondsTotal;
 #else
 	/* set individual led */
 	ledControl[number1].state1 = state1;
@@ -512,7 +426,6 @@ static 	void dtimer_callback_0(void *param)
 	 */
 	TIMER_INFO_TYPE	*tinfo;
 	UINT32	ioctldata[1];
-	uint16_t write_data;
 	uint16_t write_data_red;
 	uint16_t write_data_green;
 	uint16_t write_data_blue;
@@ -545,7 +458,6 @@ static 	void dtimer_callback_0(void *param)
 	}
 
 	/* assume all leds are off */
-	write_data = GPIO_PIN10;
 	write_data_red = GPIO_PIN6;
 	write_data_green = GPIO_PIN7;
 	write_data_blue = GPIO_PIN8;
@@ -563,7 +475,7 @@ static 	void dtimer_callback_0(void *param)
 				write_data_green = 0;
 			if(color & 0x4)
 				write_data_red = 0;
-			write_data  = 0;
+
 			break;
 
 		case LED_FAST:
@@ -575,7 +487,7 @@ static 	void dtimer_callback_0(void *param)
 					write_data_green = 0;
 				if(color & 0x4)
 					write_data_red = 0;
-				write_data  = 0;
+
 			}
 			break;
 
@@ -588,15 +500,17 @@ static 	void dtimer_callback_0(void *param)
 					write_data_green = 0;
 				if(color & 0x4)
 					write_data_red = 0;
-				write_data  = 0;
+
 			}
+			break;
+
+		default:
 			break;
 	}
 	if(ledColor.inProgress == 0)
 	{
 		if(ledColor.count1 == 0)
 		{
-			write_data = GPIO_PIN10;
 			write_data_red = GPIO_PIN6;
 			write_data_green = GPIO_PIN7;
 			write_data_blue = GPIO_PIN8;
@@ -620,7 +534,6 @@ static 	void dtimer_callback_0(void *param)
 	{
 		if(ledColor.count2 == 0)
 		{
-			write_data = 0;
 			write_data_red = 0;
 			write_data_green = 0;
 			write_data_blue = 0;
@@ -656,7 +569,6 @@ static 	void dtimer_callback_0(void *param)
 			ledColor.countReload1 = 0;
 			ledColor.count2 = 0;
 			ledColor.countReload2 = 0;
-			write_data = GPIO_PIN10;
 			write_data_red = GPIO_PIN6;
 			write_data_green = GPIO_PIN7;
 			write_data_blue = GPIO_PIN8;
@@ -704,12 +616,11 @@ static 	void dtimer_callback_1(void *param)
 void start_LED_timer()
 {
 //	OAL_EVENT_GROUP	*event;
-	UINT32	ioctldata[3], tickvalue[2], starttick;
+	UINT32	ioctldata[3];
 	TIMER_INFO_TYPE tinfo[2];
-	UNSIGNED masked_evt, checkflag, stackflag;
 	UINT32 	cursysclock;
 
-	checkflag = 0;
+
 
 //	starttick = OAL_RETRIEVE_CLOCK();
 
@@ -767,7 +678,7 @@ void start_LED_timer()
 
 		DTIMER_IOCTL(dtimer0, DTIMER_SET_ACTIVE, ioctldata );
 
-		checkflag |= 0x0004;
+		//checkflag |= 0x0004;
 		PRINTF("Start Timer 0\n");
 	}
 #if 0
@@ -814,7 +725,7 @@ void cmd_run(int argc, char *argv[])
 
 	if (argc > 2)
 	{
-		PRINTF("Usage: run  [0/1]\n   ex) run 1\n\n");
+		PRINTF("Usage: run  [0/1/2]\n   ex) run 1\n\n");
 		return;
 	}
 	if (argc == 2)
@@ -828,6 +739,94 @@ void cmd_run(int argc, char *argv[])
 }
 
 
+//
+//-----------------------------------------------------------------------
+// Internal Functions
+//-----------------------------------------------------------------------
+
+void cmd_test(int argc, char *argv[])
+{
+    if (argc < 2) {
+        PRINTF("Usage: testcmd [option]\n   ex) testcmd test\n\n");
+        return;
+    }
+
+    PRINTF("\n### TEST CMD : %s ###\n\n", argv[1]);
+}
+
+void cmd_txpwr(int argc, char *argv[])
+{
+    int i;
+    int channel, pwr_mode, power, power_dsss;
+
+    if (argc != 30) {
+        goto error;
+    }
+
+    pwr_mode = (int)ctoi(argv[1]);
+    PRINTF("TX PWR : [%s] ", (pwr_mode)?"AP":"STA");
+    PRINTF("\n OFDM \n");
+    for (i = 0; i < 14; i++) {
+        user_power_level[i] = (UCHAR)htoi(argv[i + 2]);
+
+        if (user_power_level[i] > 0x0f) {
+            PRINTF("..................\n");
+            goto error;
+        } else {
+            PRINTF("CH%02d[0x%x] ", i + 1, user_power_level[i]);
+        }
+
+        if (i == 6)
+            PRINTF("\n");
+    }
+
+    PRINTF("\n DSSS \n");
+    for (i = 14; i < 28; i++) {
+        user_power_level_dsss[i - 14] = (UCHAR)htoi(argv[i + 2]);
+
+        if (user_power_level_dsss[i - 14] > 0x0f) {
+            PRINTF("..................\n");
+            goto error;
+        } else {
+            PRINTF("CH%02d[0x%x] ", i + 1, user_power_level_dsss[i - 14]);
+        }
+
+        if (i == 20)
+            PRINTF("\n");
+    }
+
+    PRINTF("\n");
+    channel = get_current_freq_ch();
+    power = user_power_level[channel-1];
+    power_dsss = user_power_level_dsss[channel-1];
+
+    fc80211_set_tx_power_table(pwr_mode, (unsigned int *)&user_power_level, (unsigned int *)&user_power_level_dsss);
+    fc80211_set_tx_power_grade_idx(pwr_mode, power, power_dsss);
+
+    PRINTF("TX PWR set channel[%d], pwr [0x%x]\n", channel, power);
+
+    return;
+
+
+error:
+    PRINTF("\n\tUsage : utxpwr mode [CH1 CH2 ... CH13 CH14] [CH1 CH2 ... CH13 CH14 [DSSS]]\n");
+    PRINTF("\t\tCH    0~f\n");
+    PRINTF("\t\tex) utxpwr 0 1 1 1 1 1 1 1 1 1 1 1 f f f 2 3 3 3 3 3 3 3 3 3 1 f f f\n");
+
+}
+
+#if defined(__COAP_CLIENT_SAMPLE__)
+void cmd_coap_client(int argc, char *argv[])
+{
+    extern void coap_client_sample_cmd(int argc, char *argv[]);
+
+    coap_client_sample_cmd(argc, argv);
+
+    return;
+}
+#endif /* __COAP_CLIENT_SAMPLE__ */
+
+/* EOF */
 
 
 /* EOF */
