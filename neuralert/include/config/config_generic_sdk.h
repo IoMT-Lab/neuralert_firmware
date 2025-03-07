@@ -509,7 +509,7 @@
     //
     // Support DHCP Server on the DA16200 Soft-AP mode.
     //
-    #undef __SUPPORT_DHCP_SVR__
+    #define __SUPPORT_DHCP_SVR__
 
     //
     // Support OTA-Update through Wi-Fi connection
@@ -698,7 +698,7 @@
     //
     // Support User DHCP-client hostname function.
     //
-    //  This feature support to set user DHCP hostname rather than default value (DA16200-XXYY).
+    //  This feature support to set user DHCP hostname rather than default value (DHCP_).
     //  When enable this feature, console command is enabled.
     //
     //  Note #1) This feature complies with RFCs(952, 1123).

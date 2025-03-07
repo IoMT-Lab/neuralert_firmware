@@ -58,7 +58,7 @@
 #include "common.h"
 // FreeRTOSConfig included for info about tick timing
 #include "app_common_util.h"
-
+#include "json.h"
 #include "user_version.h"
 
 /**
@@ -358,6 +358,14 @@ SemaphoreHandle_t Process_semaphore = NULL;
  */
 static accelDataStruct accelXmitData[MAX_SAMPLES_PER_PACKET];
 
+
+/**
+ * @var Provisioning Type get from app_start_provisioning mode.
+ *    Generic SDK:1,
+ *    Platform AWS: Generic:10, ATCMD:11, ...
+ *    Platform AZURE: Generic:20, ATCMD:21, ...
+ */
+int8_t Provision_Type = -1;
 
 /*
  * Area in which to compose JSON packet
@@ -3892,6 +3900,282 @@ static void user_reboot(void)
 
 
 
+
+/**
+ ****************************************************************************************
+ * @brief dump hex data from TCP
+ *        This is used for provisioning only!
+ ****************************************************************************************
+ */
+void tcp_hex_dump(const char *title, unsigned char *buf, size_t len)
+{
+#if defined (TCP_ENABLED_HEXDUMP)
+	//extern void hex_dump(unsigned char *data, unsigned int length);
+
+	if (len) {
+		PRINTF("%s(%ld)\n", title, len);
+		hex_dump(buf, len);
+	}
+#else
+	DA16X_UNUSED_ARG(title);
+	DA16X_UNUSED_ARG(buf);
+	DA16X_UNUSED_ARG(len);
+#endif // (TCP_ENABLED_HEXDUMP)
+
+}
+
+
+
+/**
+ ****************************************************************************************
+ * @brief start a tcp server
+ *        This is used for provisioning only!
+ ****************************************************************************************
+ */
+void tcp_server_thread(void *param)
+{
+    DA16X_UNUSED_ARG(param);
+
+    int ret = 0;
+    int listen_sock = -1;
+    int client_sock = -1;
+
+    struct sockaddr_in server_addr;
+
+    struct sockaddr_in client_addr;
+    int client_addrlen = sizeof(struct sockaddr_in);
+
+    int len = 0;
+    unsigned char data_buffer[TCP_SERVER_DEF_BUF_SIZE] = {0x00,};
+
+    memset(&server_addr, 0x00, sizeof(struct sockaddr_in));
+    memset(&client_addr, 0x00, sizeof(struct sockaddr_in));
+
+    PRINTF("[%s] Start of TCP Server sample\r\n", __func__);
+
+    listen_sock = socket(PF_INET, SOCK_STREAM, 0);
+    if (listen_sock < 0) {
+        PRINTF("[%s] Failed to create listen socket\r\n", __func__);
+        goto end_of_task;
+    }
+
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    server_addr.sin_port = htons(TCP_SERVER_DEF_PORT);
+
+    ret = bind(listen_sock, (struct sockaddr *)&server_addr,
+               sizeof(struct sockaddr_in));
+    if (ret == -1) {
+        PRINTF("[%s] Failed to bind socket\r\n", __func__);
+        goto end_of_task;
+    }
+
+    ret = listen(listen_sock, TCP_SERVER_BACKLOG);
+    if (ret != 0) {
+        PRINTF("[%s] Failed to listen socket of tcp server(%d)\r\n",
+               __func__, ret);
+        goto end_of_task;
+    }
+
+    while (1) {
+        client_sock = -1;
+        memset(&client_addr, 0x00, sizeof(struct sockaddr_in));
+        client_addrlen = sizeof(struct sockaddr_in);
+
+        client_sock = accept(listen_sock, (struct sockaddr *)&client_addr,
+                             (socklen_t *)&client_addrlen);
+        if (client_sock < 0) {
+            continue;
+        }
+
+        PRINTF("Connected client(%d.%d.%d.%d:%d)\r\n",
+               (ntohl(client_addr.sin_addr.s_addr) >> 24) & 0xFF,
+               (ntohl(client_addr.sin_addr.s_addr) >> 16) & 0xFF,
+               (ntohl(client_addr.sin_addr.s_addr) >>  8) & 0xFF,
+               (ntohl(client_addr.sin_addr.s_addr)      ) & 0xFF,
+               (ntohs(client_addr.sin_port)));
+
+		unsigned char* msg_buf = NULL;
+    	uint32_t msg_len = 0;
+    	uint32_t msg_pos = 0;
+        while (1) {
+
+
+            memset(data_buffer, 0x00, sizeof(data_buffer));
+
+            PRINTF("< Read from client: ");
+
+            len = recv(client_sock, data_buffer, sizeof(data_buffer), 0);
+            if (len <= 0) {
+                PRINTF("[%s] Failed to receive data(%d)\r\n", __func__, len);
+                break;
+            }
+        	data_buffer[len] = '\0';
+
+        	PRINTF("%d bytes read\r\n", len);
+        	tcp_hex_dump("Received data", (unsigned char *)data_buffer, len);
+
+			// initialize new message
+			if (msg_len == 0) {
+				// store message length
+				msg_len = (data_buffer[0] << 24) + (data_buffer[1] << 16) + (data_buffer[2] << 8) + data_buffer[3];
+				PRINTF("Size of incoming message: (%d) (%x %x %x %x)\n", msg_len, data_buffer[0],
+					data_buffer[1], data_buffer[2], data_buffer[3]);
+				vTaskDelay(3);
+
+				// initialize message buffer
+				msg_buf = pvPortMalloc(msg_len + 1);
+				memset(msg_buf, 0x00, sizeof(msg_buf));
+
+				// copy the buffer data to msg_buf (minus the first four bytes)
+				for (int i = 4; i < len; i++) {
+					msg_buf[i-4] = data_buffer[i];
+				}
+				msg_pos += (len - 4);
+			} else {
+
+				// copy the buffer data to msg_buf
+				for (int i = 0; i < len; i++) {
+					msg_buf[i+msg_pos] = data_buffer[i];
+				}
+				msg_pos += len;
+			}
+
+        	// check if we have received all the data yet
+        	if (msg_len == msg_pos) {
+        		msg_buf[msg_pos] = '\0'; // signify end of message
+        		break;
+        	}
+        }
+
+    	PRINTF("%d bytes read\r\n", msg_len);
+    	tcp_hex_dump("Received message", (unsigned char *)msg_buf, msg_len);
+
+
+        close(client_sock);
+        PRINTF("Disconnected client\r\n");
+
+
+    	// free memory
+    	if (msg_buf != NULL) {
+    		vPortFree(msg_buf);
+    	}
+    }
+
+end_of_task:
+
+    PRINTF("[%s] End of TCP Server sample\r\n", __func__);
+
+    close(listen_sock);
+    close(client_sock);
+
+	vTaskDelete(NULL);
+}
+
+
+/**
+ ****************************************************************************************
+ * @brief Entry function for APP provisioning
+ * @param[in] _mode
+ *    Generic SDK:1,
+ *    Platform AWS: Generic:10, ATCMD:11, ...
+ *    Platform AZURE: Generic:20, ATCMD:21, ...
+ * @return  void
+ ****************************************************************************************
+ */
+void app_start_provisioning(int32_t _mode)
+{
+    int status;
+    TaskHandle_t TCPServerThreadPtr = NULL;
+
+
+#if defined (__SUPPORT_ATCMD__) && defined (__PROVISION_ATCMD__)
+    atcmd_provstat(ATCMD_PROVISION_START);
+#endif	// __SUPPORT_ATCMD__ && __PROVISION_ATCMD__
+
+
+	if(_mode == SYSMODE_AP_ONLY)
+	{
+		APRINTF_S("\n=======================================================\n");
+
+		APRINTF_S("[Start Provisioning with TCP/TLS] .. Soft AP Mode \n");
+
+		APRINTF_S("=======================================================\n");
+	}else if (_mode == SYSMODE_STA_N_AP)
+	{
+		APRINTF_S("\n=======================================================\n");
+
+		APRINTF_S("[Start Provisioning with TCP/TLS] .. Concurrent Mode(STA/AP) \n");
+
+		APRINTF_S("=======================================================\n");
+	}
+
+
+    Provision_Type = (int8_t)_mode;
+
+    // TCP provisioning
+    /* Create provision TCP thread on Soft-AP mode */
+    status = xTaskCreate(tcp_server_thread,
+    APP_SOFTAP_PROV_NAME,
+    APP_SOFTAP_PROV_STACK_SZ, (void*)NULL,
+    OS_TASK_PRIORITY_USER + 3, &TCPServerThreadPtr);
+    if (status != pdPASS) {
+        APRINTF("[%s] Failed to create TCP svr thread\r\n", __func__);
+    }
+
+
+}
+
+/**
+ ****************************************************************************************
+ * @brief SoftAP Provisioning application thread calling function
+ * @param[in] arg - transfer information
+ * @return  void
+ *
+ * Note: this code was taken from app_provisioning_sample.c
+ ****************************************************************************************
+ */
+void softap_provisioning(void *arg)
+{
+    int sys_wdog_id = -1;
+    int sysmode;
+
+    DA16X_UNUSED_ARG(arg);
+
+    sys_wdog_id = da16x_sys_watchdog_register(pdFALSE);
+
+    da16x_sys_watchdog_notify(sys_wdog_id);
+
+#if defined (__SUPPORT_ATCMD__) && defined (__PROVISION_ATCMD__)
+	atcmd_provstat(ATCMD_PROVISION_START);
+#endif	// __SUPPORT_ATCMD__ && __PROVISION_ATCMD__
+
+SOFTAP_MODE :
+
+    da16x_sys_watchdog_suspend(sys_wdog_id);
+
+	sysmode = getSysMode();
+	if (SYSMODE_AP_ONLY == sysmode || SYSMODE_STA_N_AP == sysmode  ) {
+		app_start_provisioning(sysmode);		// support only AP_MODE
+	} else {
+		vTaskDelay(500);
+
+		if (chk_network_ready(WLAN0_IFACE) != 1) {
+			goto SOFTAP_MODE;
+		}
+	}
+
+    da16x_sys_watchdog_notify_and_resume(sys_wdog_id);
+
+    da16x_sys_watchdog_unregister(sys_wdog_id);
+
+	vTaskDelete(NULL);
+}
+
+
+
+
+
 void neuralert_app(void *param)
 {
 	DA16X_UNUSED_ARG(param);
@@ -3950,11 +4234,14 @@ void neuralert_app(void *param)
 	{
 		// State mechanism isn't up and running yet, so
 		// signal LEDs manually
-		setLEDState(CYAN, LED_SLOW, 200, 0, LED_OFFX, 0, 3600);
+		setLEDState(RED, LED_SLOW, 200, 0, LED_OFFX, 0, 3600);
 
 		// Allow time for console to settle
 		vTaskDelay(pdMS_TO_TICKS(100));
 		PRINTF("\n\n******** Waiting for run flag to be set to 1 ********\n\n");
+
+		softap_provisioning(NULL);
+
 	} else if (runFlag == 2) {
 		setLEDState(RED, LED_SLOW, 200, 0, LED_OFFX, 0, 3600);
 
