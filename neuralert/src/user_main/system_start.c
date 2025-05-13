@@ -339,7 +339,7 @@ void set_customer_softap_config(void)
 {
 #if defined ( __SUPPORT_FACTORY_RST_APMODE__ ) || defined ( __SUPPORT_FACTORY_RST_CONCURR_MODE__ )
     /* Set to user costomer's configuration */
-    ap_config_param->customer_cfg_flag = MODE_DISABLE;    // MODE_ENABLE, MODE_DISABLE
+    ap_config_param->customer_cfg_flag = MODE_ENABLE;    // MODE_ENABLE, MODE_DISABLE
 
 
     /*
@@ -347,7 +347,7 @@ void set_customer_softap_config(void)
      */
 
     /* SSID prefix */
-    sprintf(ap_config_param->ssid_name, "%s", "DA16200");
+    sprintf(ap_config_param->ssid_name, "%s", "Neuralert");
 
     /* Default open mode : AP_OPEN_MODE, AP_SECURITY_MODE */
     ap_config_param->auth_type = AP_OPEN_MODE;
@@ -362,7 +362,7 @@ void set_customer_softap_config(void)
     /*
      * Network IP address configuration
      */
-    ap_config_param->customer_ip_address = IPADDR_DEFAULT;
+    ap_config_param->customer_ip_address = IPADDR_CUSTOMER;
 
     if (ap_config_param->customer_ip_address == IPADDR_CUSTOMER) {
         sprintf(ap_config_param->ip_addr, "%s", "192.168.1.1");
@@ -374,7 +374,7 @@ void set_customer_softap_config(void)
     /*
      * DHCP Server configuration
      */
-    ap_config_param->customer_dhcpd_flag = DHCPD_DEFAULT;
+    ap_config_param->customer_dhcpd_flag = DHCPD_CUSTOMER;
 
     if (ap_config_param->customer_dhcpd_flag == DHCPD_CUSTOMER) {
         ap_config_param->dhcpd_lease_time = 3600;

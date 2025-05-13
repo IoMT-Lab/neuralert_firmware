@@ -58,8 +58,9 @@
 #include "common.h"
 // FreeRTOSConfig included for info about tick timing
 #include "app_common_util.h"
-
+#include "json.h"
 #include "user_version.h"
+#include "da16x_cert.h"
 
 /**
  ********************************************************************************
@@ -293,6 +294,7 @@ enum process_event {
 	PROCESS_EVENT_CONTINUE,
 };
 
+
 /*
  * LOCAL VARIABLE DEFINITIONS
  *******************************************************************************
@@ -358,6 +360,14 @@ SemaphoreHandle_t Process_semaphore = NULL;
  */
 static accelDataStruct accelXmitData[MAX_SAMPLES_PER_PACKET];
 
+
+/**
+ * @var Provisioning Type get from app_start_provisioning mode.
+ *    Generic SDK:1,
+ *    Platform AWS: Generic:10, ATCMD:11, ...
+ *    Platform AZURE: Generic:20, ATCMD:21, ...
+ */
+int8_t Provision_Type = -1;
 
 /*
  * Area in which to compose JSON packet
@@ -1568,19 +1578,6 @@ int parseDownlink(char *buf, int len)
 	return TRUE;
 }
 
-
-/**
- *******************************************************************************
- * @brief Callback function to receive downlink messages from the MQTT
- * broker
- *******************************************************************************
- */
-static void user_mqtt_msg_cb (const char *buf, int len, const char *topic)
-{
-	MQTT_DBG_PRINT("\n  user_mqtt_msg_cb called %s %d topic: %s\r\n\n",buf, len, topic);
-	PRINTF("\n Neuralert: [%s] Downlink command received", __func__);
-	parseDownlink((char *)buf, len);
-}
 
 
 
@@ -3892,6 +3889,476 @@ static void user_reboot(void)
 
 
 
+/**
+ ****************************************************************************************
+ * @brief parsing data for received data from phone
+ * @param[in] _recData  received data
+ * @return  int
+ ****************************************************************************************
+ */
+static int neuralert_provisioning_json_parser(const char *_recData)
+{
+	int return_val = pdTRUE;
+	int ret = 0;
+    cJSON *json_recv_data = NULL;
+	cJSON *nvram_or_cert = NULL;
+	cJSON *cur_json = NULL;
+	cJSON *cert_json = NULL;
+
+
+	PRINTF("Clearing NVRAM and CERTs ... \r\n");
+	cert_flash_delete_all(); // clear all certs
+	//We could clear the network configuration here if we want.
+
+
+	PRINTF("Executing Provisioning ... \r\n");
+    json_recv_data = cJSON_Parse(_recData);
+
+	if (json_recv_data->type != cJSON_Object) {
+		PRINTF("[%s]: type: %d, expected %d\r\n", __func__, json_recv_data->type, cJSON_Object);
+		goto end_of_task;
+	}
+
+	// Top-level API supports specification of "CERT" or "NVRAM" keys (different APIs for each)
+	nvram_or_cert = json_recv_data->child;
+	while (nvram_or_cert != NULL) {
+		if (nvram_or_cert->string == NULL) {
+			PRINTF("[%s] key value not specified (must be NVRAM or CERT)\r\n", __func__);
+			goto end_of_task;
+		}
+
+		if (nvram_or_cert->type != cJSON_Object) {
+			PRINTF("[%s]: value type: %d, expected %d\r\n", __func__, nvram_or_cert->type, cJSON_Object);
+			goto end_of_task;
+		}
+
+
+		if (strcmp(nvram_or_cert->string, "NVRAM") == 0) {
+			// set cur_json to first key:value pair in NVRAM object, then iterate
+			cur_json = nvram_or_cert->child;
+			while (cur_json != NULL) {
+				if (cur_json->string == NULL) {
+					PRINTF("[%s] NVRAM key value not specified\r\n", __func__);
+					goto end_of_task;
+				}
+
+				// In this implementation, we are writing directly to flash (not cache) this is to simplify the API
+				// since the cache API doesn't allow for const char names in the current API.  Const Char will make the
+				// API more readable/interpretable for the provisioning APP developer, at a small cost in provisioning
+				// energy/time.
+				if (cur_json->type == cJSON_Number) {
+					PRINTF("NVRAM type: %d, key: %s, value: %d\r\n", cur_json->type, cur_json->string, cur_json->valueint);
+					ret = write_nvram_int(cur_json->string, cur_json->valueint);
+					if (ret != 0){
+						PRINTF("[%s] NVRAM int write error: %d\r\n", __func__, ret);
+						goto end_of_task;
+					}
+				} else if (cur_json->type == cJSON_String) {
+					PRINTF("NVRAM type: %d, key: %s, value: %s\r\n", cur_json->type, cur_json->string, cur_json->valuestring);
+					ret = write_nvram_string(cur_json->string, cur_json->valuestring);
+					if (ret != 0){
+						PRINTF("[%s] NVRAM string write error: %d\r\n", __func__, ret);
+						goto end_of_task;
+					}
+				} else {
+					PRINTF("[%s] Unknown type: %d\r\n", __func__, cur_json->type);
+					goto end_of_task;
+				}
+
+				cur_json = cur_json->next;
+			}
+		} else if (strcmp(nvram_or_cert->string, "CERT") == 0) {
+			// set cur_json to first key:value pair in CERT object, then iterate
+			cur_json = nvram_or_cert->child;
+			while (cur_json != NULL) {
+				if (cur_json->string == NULL) {
+					PRINTF("[%s] CERT key value not specified\r\n", __func__);
+					goto end_of_task;
+				}
+
+				// all values will be cJSON_Objects in the CERT branch
+				if (cur_json->type != cJSON_Object) {
+					PRINTF("[%s]: CERT value type: %d, expected %d\r\n", __func__, cur_json->type, cJSON_Object);
+					goto end_of_task;
+				}
+
+				da16x_cert_t cert_data = {{0, 0, 0, 0}, {0}};
+				char *cert_ptr = NULL;
+
+				cert_json = cur_json->child;
+				while (cert_json != NULL) {
+					if (cert_json->string == NULL) {
+						PRINTF("[%s] CERT key value not specified\r\n", __func__);
+						goto end_of_task;
+					}
+
+					if (strcmp(cert_json->string, "module") == 0) {
+						PRINTF("CERT key: %s, value: %d\r\n", cert_json->string, cert_json->valueint);
+						cert_data.info.module = (unsigned int)cert_json->valueint;
+					} else if (strcmp(cert_json->string, "type") == 0) {
+						PRINTF("CERT key: %s, value: %d\r\n", cert_json->string, cert_json->valueint);
+						cert_data.info.type = (unsigned int)cert_json->valueint;
+					} else if (strcmp(cert_json->string, "format") == 0) {
+						PRINTF("CERT key: %s, value: %d\r\n", cert_json->string, cert_json->valueint);
+						cert_data.info.format = (unsigned int)cert_json->valueint;
+					} else if (strcmp(cert_json->string, "cert") == 0) {
+						PRINTF("CERT key: %s, value: %s\r\n", cert_json->string, cert_json->valuestring);
+						cert_ptr = cert_json->valuestring;
+					} else if (strcmp(cert_json->string, "cert_len") == 0) {
+						PRINTF("CERT key: %s, value: %d\r\n", cert_json->string, cert_json->valueint);
+						cert_data.info.cert_len = (unsigned int)cert_json->valueint;
+					} else {
+						PRINTF("[%s] CERT Unknown key: %d\r\n", __func__, cert_json->type);
+						goto end_of_task;
+					}
+
+					cert_json = cert_json->next;
+				}
+
+				ret = da16x_cert_write((int)cert_data.info.module, (int)cert_data.info.type, (int)cert_data.info.format,
+					(unsigned char*)cert_ptr, cert_data.info.cert_len);
+				if (ret != 0){
+					PRINTF("[%s] Certificate write error: %d\r\n", __func__, ret);
+					goto end_of_task;
+				}
+
+
+				cur_json = cur_json->next;
+			}
+		} else {
+			PRINTF("[%s] Unknown string (must be NVRAM or CERT): %s\r\n", __func__, cur_json->string);
+			goto end_of_task;
+		}
+
+		nvram_or_cert = nvram_or_cert->next;
+	}
+
+	return_val = pdFALSE;
+
+end_of_task:
+
+    cJSON_Delete(json_recv_data);
+    return return_val;
+}
+
+
+
+/**
+ ****************************************************************************************
+ * @brief dump hex data from TCP
+ *        This is used for provisioning only!
+ ****************************************************************************************
+ */
+void tcp_hex_dump(const char *title, unsigned char *buf, size_t len)
+{
+#if defined (TCP_ENABLED_HEXDUMP)
+	//extern void hex_dump(unsigned char *data, unsigned int length);
+
+	if (len) {
+		PRINTF("%s(%ld)\n", title, len);
+		hex_dump(buf, len);
+	}
+#else
+	DA16X_UNUSED_ARG(title);
+	DA16X_UNUSED_ARG(buf);
+	DA16X_UNUSED_ARG(len);
+#endif // (TCP_ENABLED_HEXDUMP)
+
+}
+
+
+
+/**
+ ****************************************************************************************
+ * @brief start a tcp server
+ *        This is used for provisioning only!
+ ****************************************************************************************
+ */
+void tcp_server_thread(void *param)
+{
+    DA16X_UNUSED_ARG(param);
+
+    int ret = 0;
+    int listen_sock = -1;
+    int client_sock = -1;
+
+    struct sockaddr_in server_addr;
+
+    struct sockaddr_in client_addr;
+    int client_addrlen = sizeof(struct sockaddr_in);
+
+    int len = 0;
+    unsigned char data_buffer[TCP_SERVER_DEF_BUF_SIZE] = {0x00,};
+
+    memset(&server_addr, 0x00, sizeof(struct sockaddr_in));
+    memset(&client_addr, 0x00, sizeof(struct sockaddr_in));
+
+    PRINTF("[%s] Start of TCP Server sample\r\n", __func__);
+
+    listen_sock = socket(PF_INET, SOCK_STREAM, 0);
+    if (listen_sock < 0) {
+        PRINTF("[%s] Failed to create listen socket\r\n", __func__);
+        goto end_of_task;
+    }
+
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    server_addr.sin_port = htons(TCP_SERVER_DEF_PORT);
+
+    ret = bind(listen_sock, (struct sockaddr *)&server_addr,
+               sizeof(struct sockaddr_in));
+    if (ret == -1) {
+        PRINTF("[%s] Failed to bind socket\r\n", __func__);
+        goto end_of_task;
+    }
+
+    ret = listen(listen_sock, TCP_SERVER_BACKLOG);
+    if (ret != 0) {
+        PRINTF("[%s] Failed to listen socket of tcp server(%d)\r\n",
+               __func__, ret);
+        goto end_of_task;
+    }
+
+	unsigned char* msg_buf = NULL;
+    while (1) {
+        client_sock = -1;
+        memset(&client_addr, 0x00, sizeof(struct sockaddr_in));
+        client_addrlen = sizeof(struct sockaddr_in);
+
+        client_sock = accept(listen_sock, (struct sockaddr *)&client_addr,
+                             (socklen_t *)&client_addrlen);
+        if (client_sock < 0) {
+            continue;
+        }
+
+        PRINTF("Connected client(%d.%d.%d.%d:%d)\r\n",
+               (ntohl(client_addr.sin_addr.s_addr) >> 24) & 0xFF,
+               (ntohl(client_addr.sin_addr.s_addr) >> 16) & 0xFF,
+               (ntohl(client_addr.sin_addr.s_addr) >>  8) & 0xFF,
+               (ntohl(client_addr.sin_addr.s_addr)      ) & 0xFF,
+               (ntohs(client_addr.sin_port)));
+
+    	// clear the message buffer if not NUll (should always be null)
+    	if (msg_buf != NULL) {
+    		vPortFree(msg_buf);
+    		msg_buf = NULL;
+    	}
+    	uint32_t msg_len = 0;
+    	uint32_t msg_pos = 0;
+        while (1) {
+
+
+            memset(data_buffer, 0x00, sizeof(data_buffer));
+
+            PRINTF("< Read from client: ");
+
+            len = recv(client_sock, data_buffer, sizeof(data_buffer), 0);
+            if (len <= 0) {
+                PRINTF("[%s] Failed to receive data(%d)\r\n", __func__, len);
+                break;
+            }
+        	data_buffer[len] = '\0';
+
+        	// Print the following for debugging purposes
+        	PRINTF("%d bytes read\r\n", len);
+        	tcp_hex_dump("Received data", (unsigned char *)data_buffer, len);
+
+			// initialize new message
+			if (msg_len == 0) {
+				// store message length
+				msg_len = (data_buffer[0] << 24) + (data_buffer[1] << 16) + (data_buffer[2] << 8) + data_buffer[3];
+				PRINTF("Size of incoming message: (%d) (%x %x %x %x)\n", msg_len, data_buffer[0],
+					data_buffer[1], data_buffer[2], data_buffer[3]);
+				vTaskDelay(3);
+
+				// initialize message buffer
+				msg_buf = pvPortMalloc(msg_len + 1);
+				memset(msg_buf, 0x00, sizeof(msg_buf));
+
+				// copy the buffer data to msg_buf (minus the first four bytes)
+				for (int i = 4; i < len; i++) {
+					msg_buf[i-4] = data_buffer[i];
+				}
+				msg_pos += (len - 4);
+			} else {
+
+				// copy the buffer data to msg_buf
+				for (int i = 0; i < len; i++) {
+					msg_buf[i+msg_pos] = data_buffer[i];
+				}
+				msg_pos += len;
+			}
+
+        	// check if we have received all the data yet
+        	if (msg_len == msg_pos) {
+        		msg_buf[msg_pos] = '\0'; // signify end of message
+        		break;
+        	} else {
+        		PRINTF("msg_len: %d, msg_pos: %d \n", msg_len, msg_pos);
+        	}
+        }
+
+    	// Print results of the provisioning packet
+    	PRINTF("%d bytes read\r\n", msg_len);
+    	tcp_hex_dump("Received message", (unsigned char *)msg_buf, msg_len);
+
+
+    	// execute provisioning
+    	int fail_flag = pdTRUE;
+    	if (msg_buf != NULL) {
+
+    		fail_flag = neuralert_provisioning_json_parser((char *)msg_buf);
+
+    		if (!fail_flag) {
+    			// Send the provisioning packet back to the host (only if successful)
+    			PRINTF("> Write to client: ");
+    			len = send(client_sock, msg_buf, msg_len, 0);
+    			if (len <= 0) {
+    				PRINTF("[%s] Failed to send data\r\n", __func__);
+    				continue;
+    			}
+    			PRINTF("%d bytes written\r\n", len);
+    		}
+
+    		// Free the message buffer -- we're done (regardless of success or fail)
+    		vPortFree(msg_buf);
+    		msg_buf = NULL;
+    	}
+
+    	if (fail_flag){
+    		PRINTF("Error parsing json -- trying again\r\n");
+    		continue;
+    	}
+
+        close(client_sock);
+        PRINTF("Disconnected client\r\n");
+
+
+    	goto end_of_task;
+    }
+
+end_of_task:
+
+    PRINTF("[%s] End of Provisioning application\r\n", __func__);
+
+    close(listen_sock);
+    close(client_sock);
+
+	// Last thing to do is set the run flag to 1 since the device is now provisioned.
+	ret = write_nvram_int("RUN_FLAG", 1);
+	if (ret != 0){
+		PRINTF("[%s] NVRAM int write error: %d\r\n", __func__, ret);
+		goto end_of_task;
+	}
+
+	user_reboot();
+	vTaskDelete(NULL); // will likely never get called, but leaving for posterity
+}
+
+
+/**
+ ****************************************************************************************
+ * @brief Entry function for APP provisioning
+ * @param[in] _mode
+ *    Generic SDK:1,
+ *    Platform AWS: Generic:10, ATCMD:11, ...
+ *    Platform AZURE: Generic:20, ATCMD:21, ...
+ * @return  void
+ ****************************************************************************************
+ */
+void app_start_provisioning(int32_t _mode)
+{
+    int status;
+    TaskHandle_t TCPServerThreadPtr = NULL;
+
+
+#if defined (__SUPPORT_ATCMD__) && defined (__PROVISION_ATCMD__)
+    atcmd_provstat(ATCMD_PROVISION_START);
+#endif	// __SUPPORT_ATCMD__ && __PROVISION_ATCMD__
+
+
+	if(_mode == SYSMODE_AP_ONLY)
+	{
+		APRINTF_S("\n=======================================================\n");
+
+		APRINTF_S("[Start Provisioning with TCP/TLS] .. Soft AP Mode \n");
+
+		APRINTF_S("=======================================================\n");
+	}else if (_mode == SYSMODE_STA_N_AP)
+	{
+		APRINTF_S("\n=======================================================\n");
+
+		APRINTF_S("[Start Provisioning with TCP/TLS] .. Concurrent Mode(STA/AP) \n");
+
+		APRINTF_S("=======================================================\n");
+	}
+
+
+    Provision_Type = (int8_t)_mode;
+
+    // TCP provisioning
+    /* Create provision TCP thread on Soft-AP mode */
+    status = xTaskCreate(tcp_server_thread,
+    APP_SOFTAP_PROV_NAME,
+    APP_SOFTAP_PROV_STACK_SZ, (void*)NULL,
+    OS_TASK_PRIORITY_USER + 3, &TCPServerThreadPtr);
+    if (status != pdPASS) {
+        APRINTF("[%s] Failed to create TCP svr thread\r\n", __func__);
+    }
+
+
+}
+
+/**
+ ****************************************************************************************
+ * @brief SoftAP Provisioning application thread calling function
+ * @param[in] arg - transfer information
+ * @return  void
+ *
+ * Note: this code was taken from app_provisioning_sample.c
+ ****************************************************************************************
+ */
+void softap_provisioning(void *arg)
+{
+    int sys_wdog_id = -1;
+    int sysmode;
+
+    DA16X_UNUSED_ARG(arg);
+
+    sys_wdog_id = da16x_sys_watchdog_register(pdFALSE);
+
+    da16x_sys_watchdog_notify(sys_wdog_id);
+
+#if defined (__SUPPORT_ATCMD__) && defined (__PROVISION_ATCMD__)
+	atcmd_provstat(ATCMD_PROVISION_START);
+#endif	// __SUPPORT_ATCMD__ && __PROVISION_ATCMD__
+
+SOFTAP_MODE :
+
+    da16x_sys_watchdog_suspend(sys_wdog_id);
+
+	sysmode = getSysMode();
+	if (SYSMODE_AP_ONLY == sysmode || SYSMODE_STA_N_AP == sysmode  ) {
+		app_start_provisioning(sysmode);		// support only AP_MODE
+	} else {
+		vTaskDelay(500);
+
+		if (chk_network_ready(WLAN0_IFACE) != 1) {
+			goto SOFTAP_MODE;
+		}
+	}
+
+    da16x_sys_watchdog_notify_and_resume(sys_wdog_id);
+
+    da16x_sys_watchdog_unregister(sys_wdog_id);
+
+	vTaskDelete(NULL);
+}
+
+
+
+
+
 void neuralert_app(void *param)
 {
 	DA16X_UNUSED_ARG(param);
@@ -3950,11 +4417,14 @@ void neuralert_app(void *param)
 	{
 		// State mechanism isn't up and running yet, so
 		// signal LEDs manually
-		setLEDState(CYAN, LED_SLOW, 200, 0, LED_OFFX, 0, 3600);
+		setLEDState(RED, LED_SLOW, 200, 0, LED_OFFX, 0, 3600);
 
 		// Allow time for console to settle
 		vTaskDelay(pdMS_TO_TICKS(100));
 		PRINTF("\n\n******** Waiting for run flag to be set to 1 ********\n\n");
+
+		softap_provisioning(NULL);
+
 	} else if (runFlag == 2) {
 		setLEDState(RED, LED_SLOW, 200, 0, LED_OFFX, 0, 3600);
 

@@ -362,12 +362,6 @@ typedef struct
 	time_t accelTime;
 #endif /* __TIME64__ */
 
-	//JW: The timestamp_sample was only used for trying to identify when the interrupt
-	// was called.  This is no longer needed as we log the buffer read time now.
-#if 0
-	int8_t timestamp_sample;				// The INDEX of the sample to which
-											// the timestamp applies
-#endif // TO BE REMOVED -- DEPRECATED
 
 	//JW: Need this sample, easier to keep it in the FIFO block rather than interpolate between
 	// entries.
@@ -475,7 +469,25 @@ typedef uint32_t _AB_transmit_map_t;
 #define FLASH_DATA_ERROR -4
 
 
+// TCP Server defs
+#define	TCP_ENABLED_HEXDUMP
+#define	TCP_SERVER_DEF_BUF_SIZE		(1024 * 1)
+#define	TCP_SERVER_DEF_PORT			10190
+#define	TCP_SERVER_DEF_TIMEOUT		100
+#define	TCP_SERVER_BACKLOG			1
 
+#define TCP_CLIENT_DEF_PORT				10192
+#define TCP_CLIENT_DEF_BUF_SIZE			(1024 * 1)
+#define TCP_CLIENT_DEF_SERVER_IP_ADDR	"10.0.0.1"
+#define TCP_CLIENT_DEF_SERVER_PORT		TCP_SERVER_DEF_PORT
+
+#define TCP_PROVISION_PORT_NUM			9999
+#define PROVISION_TCP_RX_BUF_SZ			1024
+
+
+// Provisioning Defs
+#define APP_SOFTAP_PROV_NAME			"APROV_TCP"
+#define APP_SOFTAP_PROV_STACK_SZ		1024
 
 
 // An empty guard zone is needed between the accelerometer writing location and the
@@ -575,12 +587,9 @@ extern uint8_t runFlag;
 //extern uint8_t pubAckSeen;
 extern UCHAR	runtime_cal_flag;		// system flag to enable runtime timing
 
-extern long long user_rtc_wakeup_time;    		// RTC clock when wakeup happened
-extern __time64_t user_rtc_wakeup_time_msec;  	// da16xx time when wakeup happened
-extern __time64_t user_raw_rtc_wakeup_time_msec;  // relative msec time when wakeup happened
-extern __time64_t user_raw_launch_time_msec;  // relative time msec since boot (RTC clock based)
-//extern UINT32 user_how_wakened;					// da16x_boot_get_wakeupmode() for how we woke up
-//extern int accelerometer_polled_timeout;			// true if event loop detected FIFO full
+
+
+
 
 #endif /* APPS_INCLUDE_COMMON_H_ */
 
