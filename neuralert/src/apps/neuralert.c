@@ -60,6 +60,7 @@
 #include "app_common_util.h"
 #include "json.h"
 #include "user_version.h"
+#include "da16x_cert.h"
 
 /**
  ********************************************************************************
@@ -292,6 +293,7 @@ enum process_event {
 	PROCESS_EVENT_TERMINATE,
 	PROCESS_EVENT_CONTINUE,
 };
+
 
 /*
  * LOCAL VARIABLE DEFINITIONS
@@ -1576,19 +1578,6 @@ int parseDownlink(char *buf, int len)
 	return TRUE;
 }
 
-
-/**
- *******************************************************************************
- * @brief Callback function to receive downlink messages from the MQTT
- * broker
- *******************************************************************************
- */
-static void user_mqtt_msg_cb (const char *buf, int len, const char *topic)
-{
-	MQTT_DBG_PRINT("\n  user_mqtt_msg_cb called %s %d topic: %s\r\n\n",buf, len, topic);
-	PRINTF("\n Neuralert: [%s] Downlink command received", __func__);
-	parseDownlink((char *)buf, len);
-}
 
 
 
@@ -3900,6 +3889,159 @@ static void user_reboot(void)
 
 
 
+/**
+ ****************************************************************************************
+ * @brief parsing data for received data from phone
+ * @param[in] _recData  received data
+ * @return  int
+ ****************************************************************************************
+ */
+static int neuralert_provisioning_json_parser(const char *_recData)
+{
+	int return_val = pdTRUE;
+	int ret = 0;
+    cJSON *json_recv_data = NULL;
+	cJSON *nvram_or_cert = NULL;
+	cJSON *cur_json = NULL;
+	cJSON *cert_json = NULL;
+
+
+	PRINTF("Clearing NVRAM and CERTs ... \r\n");
+	cert_flash_delete_all(); // clear all certs
+	//We could clear the network configuration here if we want.
+
+
+	PRINTF("Executing Provisioning ... \r\n");
+    json_recv_data = cJSON_Parse(_recData);
+
+	if (json_recv_data->type != cJSON_Object) {
+		PRINTF("[%s]: type: %d, expected %d\r\n", __func__, json_recv_data->type, cJSON_Object);
+		goto end_of_task;
+	}
+
+	// Top-level API supports specification of "CERT" or "NVRAM" keys (different APIs for each)
+	nvram_or_cert = json_recv_data->child;
+	while (nvram_or_cert != NULL) {
+		if (nvram_or_cert->string == NULL) {
+			PRINTF("[%s] key value not specified (must be NVRAM or CERT)\r\n", __func__);
+			goto end_of_task;
+		}
+
+		if (nvram_or_cert->type != cJSON_Object) {
+			PRINTF("[%s]: value type: %d, expected %d\r\n", __func__, nvram_or_cert->type, cJSON_Object);
+			goto end_of_task;
+		}
+
+
+		if (strcmp(nvram_or_cert->string, "NVRAM") == 0) {
+			// set cur_json to first key:value pair in NVRAM object, then iterate
+			cur_json = nvram_or_cert->child;
+			while (cur_json != NULL) {
+				if (cur_json->string == NULL) {
+					PRINTF("[%s] NVRAM key value not specified\r\n", __func__);
+					goto end_of_task;
+				}
+
+				// In this implementation, we are writing directly to flash (not cache) this is to simplify the API
+				// since the cache API doesn't allow for const char names in the current API.  Const Char will make the
+				// API more readable/interpretable for the provisioning APP developer, at a small cost in provisioning
+				// energy/time.
+				if (cur_json->type == cJSON_Number) {
+					PRINTF("NVRAM type: %d, key: %s, value: %d\r\n", cur_json->type, cur_json->string, cur_json->valueint);
+					ret = write_nvram_int(cur_json->string, cur_json->valueint);
+					if (ret != 0){
+						PRINTF("[%s] NVRAM int write error: %d\r\n", __func__, ret);
+						goto end_of_task;
+					}
+				} else if (cur_json->type == cJSON_String) {
+					PRINTF("NVRAM type: %d, key: %s, value: %s\r\n", cur_json->type, cur_json->string, cur_json->valuestring);
+					ret = write_nvram_string(cur_json->string, cur_json->valuestring);
+					if (ret != 0){
+						PRINTF("[%s] NVRAM string write error: %d\r\n", __func__, ret);
+						goto end_of_task;
+					}
+				} else {
+					PRINTF("[%s] Unknown type: %d\r\n", __func__, cur_json->type);
+					goto end_of_task;
+				}
+
+				cur_json = cur_json->next;
+			}
+		} else if (strcmp(nvram_or_cert->string, "CERT") == 0) {
+			// set cur_json to first key:value pair in CERT object, then iterate
+			cur_json = nvram_or_cert->child;
+			while (cur_json != NULL) {
+				if (cur_json->string == NULL) {
+					PRINTF("[%s] CERT key value not specified\r\n", __func__);
+					goto end_of_task;
+				}
+
+				// all values will be cJSON_Objects in the CERT branch
+				if (cur_json->type != cJSON_Object) {
+					PRINTF("[%s]: CERT value type: %d, expected %d\r\n", __func__, cur_json->type, cJSON_Object);
+					goto end_of_task;
+				}
+
+				da16x_cert_t cert_data = {{0, 0, 0, 0}, {0}};
+				char *cert_ptr = NULL;
+
+				cert_json = cur_json->child;
+				while (cert_json != NULL) {
+					if (cert_json->string == NULL) {
+						PRINTF("[%s] CERT key value not specified\r\n", __func__);
+						goto end_of_task;
+					}
+
+					if (strcmp(cert_json->string, "module") == 0) {
+						PRINTF("CERT key: %s, value: %d\r\n", cert_json->string, cert_json->valueint);
+						cert_data.info.module = (unsigned int)cert_json->valueint;
+					} else if (strcmp(cert_json->string, "type") == 0) {
+						PRINTF("CERT key: %s, value: %d\r\n", cert_json->string, cert_json->valueint);
+						cert_data.info.type = (unsigned int)cert_json->valueint;
+					} else if (strcmp(cert_json->string, "format") == 0) {
+						PRINTF("CERT key: %s, value: %d\r\n", cert_json->string, cert_json->valueint);
+						cert_data.info.format = (unsigned int)cert_json->valueint;
+					} else if (strcmp(cert_json->string, "cert") == 0) {
+						PRINTF("CERT key: %s, value: %s\r\n", cert_json->string, cert_json->valuestring);
+						cert_ptr = cert_json->valuestring;
+					} else if (strcmp(cert_json->string, "cert_len") == 0) {
+						PRINTF("CERT key: %s, value: %d\r\n", cert_json->string, cert_json->valueint);
+						cert_data.info.cert_len = (unsigned int)cert_json->valueint;
+					} else {
+						PRINTF("[%s] CERT Unknown key: %d\r\n", __func__, cert_json->type);
+						goto end_of_task;
+					}
+
+					cert_json = cert_json->next;
+				}
+
+				ret = da16x_cert_write((int)cert_data.info.module, (int)cert_data.info.type, (int)cert_data.info.format,
+					(unsigned char*)cert_ptr, cert_data.info.cert_len);
+				if (ret != 0){
+					PRINTF("[%s] Certificate write error: %d\r\n", __func__, ret);
+					goto end_of_task;
+				}
+
+
+				cur_json = cur_json->next;
+			}
+		} else {
+			PRINTF("[%s] Unknown string (must be NVRAM or CERT): %s\r\n", __func__, cur_json->string);
+			goto end_of_task;
+		}
+
+		nvram_or_cert = nvram_or_cert->next;
+	}
+
+	return_val = pdFALSE;
+
+end_of_task:
+
+    cJSON_Delete(json_recv_data);
+    return return_val;
+}
+
+
 
 /**
  ****************************************************************************************
@@ -3977,6 +4119,7 @@ void tcp_server_thread(void *param)
         goto end_of_task;
     }
 
+	unsigned char* msg_buf = NULL;
     while (1) {
         client_sock = -1;
         memset(&client_addr, 0x00, sizeof(struct sockaddr_in));
@@ -3995,7 +4138,11 @@ void tcp_server_thread(void *param)
                (ntohl(client_addr.sin_addr.s_addr)      ) & 0xFF,
                (ntohs(client_addr.sin_port)));
 
-		unsigned char* msg_buf = NULL;
+    	// clear the message buffer if not NUll (should always be null)
+    	if (msg_buf != NULL) {
+    		vPortFree(msg_buf);
+    		msg_buf = NULL;
+    	}
     	uint32_t msg_len = 0;
     	uint32_t msg_pos = 0;
         while (1) {
@@ -4012,6 +4159,7 @@ void tcp_server_thread(void *param)
             }
         	data_buffer[len] = '\0';
 
+        	// Print the following for debugging purposes
         	PRINTF("%d bytes read\r\n", len);
         	tcp_hex_dump("Received data", (unsigned char *)data_buffer, len);
 
@@ -4045,31 +4193,66 @@ void tcp_server_thread(void *param)
         	if (msg_len == msg_pos) {
         		msg_buf[msg_pos] = '\0'; // signify end of message
         		break;
+        	} else {
+        		PRINTF("msg_len: %d, msg_pos: %d \n", msg_len, msg_pos);
         	}
         }
 
+    	// Print results of the provisioning packet
     	PRINTF("%d bytes read\r\n", msg_len);
     	tcp_hex_dump("Received message", (unsigned char *)msg_buf, msg_len);
 
+
+    	// execute provisioning
+    	int fail_flag = pdTRUE;
+    	if (msg_buf != NULL) {
+
+    		fail_flag = neuralert_provisioning_json_parser((char *)msg_buf);
+
+    		if (!fail_flag) {
+    			// Send the provisioning packet back to the host (only if successful)
+    			PRINTF("> Write to client: ");
+    			len = send(client_sock, msg_buf, msg_len, 0);
+    			if (len <= 0) {
+    				PRINTF("[%s] Failed to send data\r\n", __func__);
+    				continue;
+    			}
+    			PRINTF("%d bytes written\r\n", len);
+    		}
+
+    		// Free the message buffer -- we're done (regardless of success or fail)
+    		vPortFree(msg_buf);
+    		msg_buf = NULL;
+    	}
+
+    	if (fail_flag){
+    		PRINTF("Error parsing json -- trying again\r\n");
+    		continue;
+    	}
 
         close(client_sock);
         PRINTF("Disconnected client\r\n");
 
 
-    	// free memory
-    	if (msg_buf != NULL) {
-    		vPortFree(msg_buf);
-    	}
+    	goto end_of_task;
     }
 
 end_of_task:
 
-    PRINTF("[%s] End of TCP Server sample\r\n", __func__);
+    PRINTF("[%s] End of Provisioning application\r\n", __func__);
 
     close(listen_sock);
     close(client_sock);
 
-	vTaskDelete(NULL);
+	// Last thing to do is set the run flag to 1 since the device is now provisioned.
+	ret = write_nvram_int("RUN_FLAG", 1);
+	if (ret != 0){
+		PRINTF("[%s] NVRAM int write error: %d\r\n", __func__, ret);
+		goto end_of_task;
+	}
+
+	user_reboot();
+	vTaskDelete(NULL); // will likely never get called, but leaving for posterity
 }
 
 
