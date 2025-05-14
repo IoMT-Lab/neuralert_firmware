@@ -97,6 +97,8 @@
 /* Retention Memory */
 #define USER_RTM_DATA_TAG						"uRtmData"
 
+/* Provisioning key */
+#define USER_PROVISIONING_KEY "E72ttV0Ydp3"
 
 /*
  * Accelerometer buffer (AB) setup
@@ -361,13 +363,6 @@ SemaphoreHandle_t Process_semaphore = NULL;
 static accelDataStruct accelXmitData[MAX_SAMPLES_PER_PACKET];
 
 
-/**
- * @var Provisioning Type get from app_start_provisioning mode.
- *    Generic SDK:1,
- *    Platform AWS: Generic:10, ATCMD:11, ...
- *    Platform AZURE: Generic:20, ATCMD:21, ...
- */
-int8_t Provision_Type = -1;
 
 /*
  * Area in which to compose JSON packet
@@ -935,7 +930,7 @@ int send_json_packet(const int count, const unsigned int transmission, const int
 
 	// get data from user memory
 	if (take_semaphore(&User_semaphore)) {
-		PRINTF("\n Neuralert: [%s] error taking user semaphore");
+		PRINTF("\n Neuralert: [%s] error taking user semaphore",__func__);
 		PRINTF("\n Neuralert: [%s] transmit %d:%d unsuccessful", __func__, transmission, sequence);
 		return pdTRUE;
 	} else {
@@ -3447,7 +3442,7 @@ void user_initialize_accelerometer(void)
 static int user_process_bootup_event(void)
 {
 
-	int MACaddrtype = 0;
+
 
 	// initialize boot up process variables
 	if (take_semaphore(&Process_semaphore)) {
@@ -3469,9 +3464,11 @@ static int user_process_bootup_event(void)
 	// Turn off wifi, if it somehow got turned on
 	wifi_cs_rf_cntrl(TRUE);		// RF now off
 
+#if 0
 	// Whether WIFI is connected or not, see if we can obtain our
 	// MAC address
 	// Check our MAC string used as a unique device identifier
+	int MACaddrtype = 0;
 	memset(macstr, 0, 18);
 	memset(MACaddr, 0,7);
 	while (MACaddrtype == 0) { // we need the MACaddr -- without it, data packets will be wrong.
@@ -3486,6 +3483,7 @@ static int user_process_bootup_event(void)
 	MACaddr[5] = macstr[16];
 	PRINTF("\n MAC address - %s (type: %d)", macstr, MACaddrtype);
 	//vTaskDelay(10); // delay between obtaining the MAC addr and strcpy (below).  Delay for reset achieves this.
+#endif
 
 	// The following delay gives the user time to type in a
 	// command, such as:
@@ -3896,7 +3894,73 @@ static void user_reboot(void)
  * @return  int
  ****************************************************************************************
  */
-static int neuralert_provisioning_json_parser(const char *_recData)
+static int neuralert_provisioning_step1(const char *_recData, char *reply_buf, uint32_t *reply_len)
+{
+	int return_val = pdTRUE;
+	cJSON *cur_json = NULL;
+
+
+	PRINTF("Retrieving Device Request ... \r\n");
+    cur_json = cJSON_Parse(_recData);
+
+	if (cur_json->type != cJSON_Object) {
+		PRINTF("[%s]: type: %d, expected %d\r\n", __func__, cur_json->type, cJSON_Object);
+		goto end_of_task;
+	}
+
+	// Dictionary with an Entry corresponding to "KEY"
+	cur_json = cur_json->child;
+	while (cur_json != NULL) {
+		if (cur_json->string == NULL) {
+			PRINTF("[%s] key value not specified (must be KEY)\r\n", __func__);
+			goto end_of_task;
+		}
+
+
+		if (strcmp(cur_json->string, "KEY") == 0) {
+			if (cur_json->type != cJSON_String) {
+				PRINTF("[%s]: value type: %d, expected %d\r\n", __func__,  cur_json->type, cJSON_String);
+				goto end_of_task;
+			}
+
+			if (strcmp(cur_json->valuestring, USER_PROVISIONING_KEY) == 0) {
+				PRINTF("Provided key matches, reply with device info\r\n");
+
+				*reply_len = sprintf(reply_buf,"{\"software\":\"%s\",\"version\":\"%s\",\"build\":\"%s %s\",\"id\":\"%s\"}",
+	USER_SOFTWARE_PART_NUMBER_STRING, USER_VERSION_STRING, __DATE__, __TIME__, MACaddr);
+
+			} else {
+				PRINTF("[%s] key is incorrect\r\n", __func__);
+				goto end_of_task;
+			}
+		} else {
+			PRINTF("[%s] Unknown string (must be KEY): %s\r\n", __func__, cur_json->string);
+			goto end_of_task;
+		}
+
+		cur_json = cur_json->next;
+	}
+
+	return_val = pdFALSE;
+
+end_of_task:
+
+    cJSON_Delete(cur_json);
+    return return_val;
+}
+
+
+
+
+
+/**
+ ****************************************************************************************
+ * @brief parsing data for received data from phone
+ * @param[in] _recData  received data
+ * @return  int
+ ****************************************************************************************
+ */
+static int neuralert_provisioning_step2(const char *_recData)
 {
 	int return_val = pdTRUE;
 	int ret = 0;
@@ -4070,17 +4134,19 @@ void tcp_hex_dump(const char *title, unsigned char *buf, size_t len)
 
 /**
  ****************************************************************************************
- * @brief start a tcp server
- *        This is used for provisioning only!
+ * @brief start a tcp server for provisioning (only used for provisioning).
+ *
+ *
  ****************************************************************************************
  */
-void tcp_server_thread(void *param)
+void tcp_server_thread(void *arg)
 {
-    DA16X_UNUSED_ARG(param);
+    DA16X_UNUSED_ARG(arg);
 
     int ret = 0;
     int listen_sock = -1;
     int client_sock = -1;
+	int provisioning_step = 1; // starts at 1 (not 0)
 
     struct sockaddr_in server_addr;
 
@@ -4120,6 +4186,8 @@ void tcp_server_thread(void *param)
     }
 
 	unsigned char* msg_buf = NULL;
+	unsigned char* reply_buf = NULL;
+	uint32_t reply_len = 100; // hardcoded here
     while (1) {
         client_sock = -1;
         memset(&client_addr, 0x00, sizeof(struct sockaddr_in));
@@ -4207,17 +4275,52 @@ void tcp_server_thread(void *param)
     	int fail_flag = pdTRUE;
     	if (msg_buf != NULL) {
 
-    		fail_flag = neuralert_provisioning_json_parser((char *)msg_buf);
+    		if (provisioning_step == 1) {
 
-    		if (!fail_flag) {
-    			// Send the provisioning packet back to the host (only if successful)
-    			PRINTF("> Write to client: ");
-    			len = send(client_sock, msg_buf, msg_len, 0);
-    			if (len <= 0) {
-    				PRINTF("[%s] Failed to send data\r\n", __func__);
-    				continue;
+    			// initialize the reply buffer
+    			if (reply_buf != NULL) {
+    				vPortFree(reply_buf);
+    				reply_buf = NULL;
     			}
-    			PRINTF("%d bytes written\r\n", len);
+    			reply_buf = pvPortMalloc(reply_len + 1);
+    			memset(reply_buf, 0x00, sizeof(reply_buf));
+
+    			fail_flag = neuralert_provisioning_step1((char *)msg_buf, (char *)reply_buf, &reply_len);
+    			reply_buf[reply_len] = '\0';
+
+    			if (!fail_flag) {
+    				// Send the provisioning packet back to the host (only if successful)
+    				PRINTF("> Write to client: ");
+    				len = send(client_sock, reply_buf, reply_len, 0);
+    				vPortFree(reply_buf);
+    				reply_buf = NULL;
+
+    				if (len <= 0) {
+    					PRINTF("[%s] Failed to send data\r\n", __func__);
+    					continue;
+    				}
+    				PRINTF("%d bytes written\r\n", len);
+    				provisioning_step = 2; // setup the next TCP exchange for provisioning
+    			}
+
+    			// make sure the reply buffer is freed
+    			if (reply_buf != NULL) {
+    				vPortFree(reply_buf);
+    				reply_buf = NULL;
+    			}
+    		} else if (provisioning_step == 2) {
+    			fail_flag = neuralert_provisioning_step2((char *)msg_buf);
+
+    			if (!fail_flag) {
+    				// Send the provisioning packet back to the host (only if successful)
+    				PRINTF("> Write to client: ");
+    				len = send(client_sock, msg_buf, msg_len, 0);
+    				if (len <= 0) {
+    					PRINTF("[%s] Failed to send data\r\n", __func__);
+    					continue;
+    				}
+    				PRINTF("%d bytes written\r\n", len);
+    			}
     		}
 
     		// Free the message buffer -- we're done (regardless of success or fail)
@@ -4272,29 +4375,6 @@ void app_start_provisioning(int32_t _mode)
     TaskHandle_t TCPServerThreadPtr = NULL;
 
 
-#if defined (__SUPPORT_ATCMD__) && defined (__PROVISION_ATCMD__)
-    atcmd_provstat(ATCMD_PROVISION_START);
-#endif	// __SUPPORT_ATCMD__ && __PROVISION_ATCMD__
-
-
-	if(_mode == SYSMODE_AP_ONLY)
-	{
-		APRINTF_S("\n=======================================================\n");
-
-		APRINTF_S("[Start Provisioning with TCP/TLS] .. Soft AP Mode \n");
-
-		APRINTF_S("=======================================================\n");
-	}else if (_mode == SYSMODE_STA_N_AP)
-	{
-		APRINTF_S("\n=======================================================\n");
-
-		APRINTF_S("[Start Provisioning with TCP/TLS] .. Concurrent Mode(STA/AP) \n");
-
-		APRINTF_S("=======================================================\n");
-	}
-
-
-    Provision_Type = (int8_t)_mode;
 
     // TCP provisioning
     /* Create provision TCP thread on Soft-AP mode */
@@ -4306,7 +4386,6 @@ void app_start_provisioning(int32_t _mode)
         APRINTF("[%s] Failed to create TCP svr thread\r\n", __func__);
     }
 
-
 }
 
 /**
@@ -4315,7 +4394,10 @@ void app_start_provisioning(int32_t _mode)
  * @param[in] arg - transfer information
  * @return  void
  *
- * Note: this code was taken from app_provisioning_sample.c
+ * Note: this code was adapted taken from app_provisioning_sample.c
+ *
+ * The Neuralert provisioning only supports SYSMODE_AP_ONLY ... no concurrent station+AP
+ * support.
  ****************************************************************************************
  */
 void softap_provisioning(void *arg)
@@ -4329,17 +4411,24 @@ void softap_provisioning(void *arg)
 
     da16x_sys_watchdog_notify(sys_wdog_id);
 
-#if defined (__SUPPORT_ATCMD__) && defined (__PROVISION_ATCMD__)
-	atcmd_provstat(ATCMD_PROVISION_START);
-#endif	// __SUPPORT_ATCMD__ && __PROVISION_ATCMD__
 
 SOFTAP_MODE :
 
     da16x_sys_watchdog_suspend(sys_wdog_id);
 
 	sysmode = getSysMode();
-	if (SYSMODE_AP_ONLY == sysmode || SYSMODE_STA_N_AP == sysmode  ) {
-		app_start_provisioning(sysmode);		// support only AP_MODE
+	if (SYSMODE_AP_ONLY == sysmode) {
+		TaskHandle_t TCPServerThreadPtr = NULL;
+
+		// TCP provisioning
+		/* Create provision TCP thread on Soft-AP mode */
+		int status = xTaskCreate(tcp_server_thread,
+		APP_SOFTAP_PROV_NAME,
+		APP_SOFTAP_PROV_STACK_SZ, (void*)NULL,
+		OS_TASK_PRIORITY_USER + 3, &TCPServerThreadPtr);
+		if (status != pdPASS) {
+			APRINTF("[%s] Failed to create TCP svr thread\r\n", __func__);
+		}
 	} else {
 		vTaskDelay(500);
 
@@ -4413,6 +4502,26 @@ void neuralert_app(void *param)
 		runFlag = storedRunFlag;
 	}
 
+	// Whether WIFI is connected or not, see if we can obtain our
+	// MAC address
+	// Check our MAC string used as a unique device identifier
+	int MACaddrtype = 0;
+	memset(macstr, 0, 18);
+	memset(MACaddr, 0,7);
+	while (MACaddrtype == 0) { // we need the MACaddr -- without it, data packets will be wrong.
+		MACaddrtype = getMACAddrStr(1, macstr);  // Hex digits string together
+		vTaskDelay(10);
+	}
+	MACaddr[0] = macstr[9];
+	MACaddr[1] = macstr[10];
+	MACaddr[2] = macstr[12];
+	MACaddr[3] = macstr[13];
+	MACaddr[4] = macstr[15];
+	MACaddr[5] = macstr[16];
+	PRINTF("\n MAC address - %s (type: %d)", macstr, MACaddrtype);
+	//vTaskDelay(10); // delay between obtaining the MAC addr and strcpy (below).  Delay for reset achieves this.
+
+
 	if(runFlag == 0)
 	{
 		// State mechanism isn't up and running yet, so
@@ -4424,23 +4533,15 @@ void neuralert_app(void *param)
 		PRINTF("\n\n******** Waiting for run flag to be set to 1 ********\n\n");
 
 		softap_provisioning(NULL);
-
-	} else if (runFlag == 2) {
-		setLEDState(RED, LED_SLOW, 200, 0, LED_OFFX, 0, 3600);
-
-		// Allow time for console to settle
-		vTaskDelay(pdMS_TO_TICKS(100));
-		PRINTF("\n\n******** Starting provisioning script ********\n\n");
 	}
 
 
-	while (TRUE)
+	while (1)
 	{
-		if(runFlag )
+		if(runFlag)
 		{
 			break;
 		}
-
 
 		da16x_sys_watchdog_notify(sys_wdog_id);
 		vTaskDelay(pdMS_TO_TICKS(100));
