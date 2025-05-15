@@ -4320,6 +4320,7 @@ void tcp_server_thread(void *arg)
     					continue;
     				}
     				PRINTF("%d bytes written\r\n", len);
+    				provisioning_step = 3;
     			}
     		}
 
@@ -4333,11 +4334,12 @@ void tcp_server_thread(void *arg)
     		continue;
     	}
 
-        close(client_sock);
-        PRINTF("Disconnected client\r\n");
-
-
-    	goto end_of_task;
+    	// check if we're done provisioning
+    	if (provisioning_step == 3) {
+    		close(client_sock);
+    		PRINTF("Disconnected client\r\n");
+    		goto end_of_task;
+    	}
     }
 
 end_of_task:
