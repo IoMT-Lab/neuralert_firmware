@@ -418,6 +418,7 @@ static void user_reboot(void);
  *******************************************************************************
  */
 extern void da16x_time64_sec(__time64_t *p, __time64_t *cur_sec);
+extern int get_current_rssi(int iface);
 extern void start_LED_timer(); //TODO: remove this?
 extern unsigned char get_fault_count(void);
 extern void system_control_wlan_enable(uint8_t onoff);
@@ -1022,6 +1023,13 @@ int send_json_packet(const int count, const unsigned int transmission, const int
 	__time64_t current_time;
 	user_time64_msec_since_poweron(&current_time);
 	sprintf(str,"\t\t\t\t\"mins\": %ld,\r\n", (uint32_t)(current_time/60000));
+	strcat(mqttMessage, str);
+
+	/*
+	* Meta - time (in minutes) since boot-up
+	*/
+	int rssi = get_current_rssi(WLAN0_IFACE);
+	sprintf(str,"\t\t\t\t\"rssi\": %d,\r\n", rssi);
 	strcat(mqttMessage, str);
 
 	/*
