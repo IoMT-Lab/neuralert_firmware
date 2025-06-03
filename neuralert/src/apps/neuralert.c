@@ -418,6 +418,7 @@ static void user_reboot(void);
  *******************************************************************************
  */
 extern void da16x_time64_sec(__time64_t *p, __time64_t *cur_sec);
+extern int get_current_rssi(int iface);
 extern void start_LED_timer(); //TODO: remove this?
 extern unsigned char get_fault_count(void);
 extern void system_control_wlan_enable(uint8_t onoff);
@@ -560,7 +561,7 @@ static void notify_user_LED()
 	} else {
 		if (BIT_SET(processLists, USER_PROCESS_BOOTUP))
 		{
-			setLEDState(YELLOW, LED_SLOW, 200, 0, LED_OFFX, 0, 200); // constant yellow
+			setLEDState(BLUE, LED_SLOW, 200, 0, LED_OFFX, 0, 200); // constant yellow
 		}
 		else // No known state
 		{
@@ -1022,6 +1023,13 @@ int send_json_packet(const int count, const unsigned int transmission, const int
 	__time64_t current_time;
 	user_time64_msec_since_poweron(&current_time);
 	sprintf(str,"\t\t\t\t\"mins\": %ld,\r\n", (uint32_t)(current_time/60000));
+	strcat(mqttMessage, str);
+
+	/*
+	* Meta - time (in minutes) since boot-up
+	*/
+	int rssi = get_current_rssi(WLAN0_IFACE);
+	sprintf(str,"\t\t\t\t\"rssi\": %d,\r\n", rssi);
 	strcat(mqttMessage, str);
 
 	/*
@@ -2562,7 +2570,32 @@ static int user_process_disable_auto_connection(void)
 	return ret;
 }
 
+/**
+ *******************************************************************************
+ * @brief Sets the SSID to correspond to "Neuralert_MACSTR"
+ * returns:
+ *		pdTRUE if there is an error
+ *		pdFALSE otherwise
+ *******************************************************************************
+ */
+static int user_set_ssid(void) {
+	//
+	// This overides the default in util_api.c factory_reset_ap_mode()
+	char neuralert_ssid[MAX_SSID_LEN + 3];
+	char tmp_buf[MAX_SSID_LEN] = { 0, };
 
+	sprintf(tmp_buf, "%s", "Neuralert");
+	memset(neuralert_ssid, 0, MAX_SSID_LEN + 3);
+
+	if (gen_ssid(tmp_buf, WLAN0_IFACE, 1, neuralert_ssid, sizeof(neuralert_ssid)) == -1) {
+		PRINTF("\n Neuralert [%s] ssid error", __func__);
+		return pdTRUE;
+	}
+	write_nvram_string((const char *)NVR_KEY_SSID_1, neuralert_ssid);
+	vTaskDelay(100);
+
+	return pdFALSE;
+}
 
 /**
  *******************************************************************************
@@ -4349,8 +4382,8 @@ end_of_task:
     close(listen_sock);
     close(client_sock);
 
-	// Last thing to do is set the run flag to 1 since the device is now provisioned.
-	ret = write_nvram_int("RUN_FLAG", 1);
+	// Last thing to do is set the run flag to 2 since the device is now provisioned.
+	ret = write_nvram_int("RUN_FLAG", 2);
 	if (ret != 0){
 		PRINTF("[%s] NVRAM int write error: %d\r\n", __func__, ret);
 		goto end_of_task;
@@ -4524,11 +4557,23 @@ void neuralert_app(void *param)
 	//vTaskDelay(10); // delay between obtaining the MAC addr and strcpy (below).  Delay for reset achieves this.
 
 
-	if(runFlag == 0)
+	if(runFlag <= 1)
 	{
 		// State mechanism isn't up and running yet, so
 		// signal LEDs manually
 		setLEDState(RED, LED_SLOW, 200, 0, LED_OFFX, 0, 3600);
+
+		// Set the SSID for provisioning (default is different than packaging in SDK 8.2) -- needs to reboot
+		if (runFlag == 0) {
+			if (!user_set_ssid()) {
+				int ret = write_nvram_int("RUN_FLAG", 1); // next time we come up, the reboot won't occur
+				if (ret != 0){
+					PRINTF("[%s] NVRAM int write error: %d\r\n", __func__, ret);
+				}
+				vTaskDelay(100); // small delay for nvram write
+			}
+			user_reboot(); //Restart the system to reset the SSID for provisioning
+		}
 
 		// Allow time for console to settle
 		vTaskDelay(pdMS_TO_TICKS(100));
@@ -4540,7 +4585,7 @@ void neuralert_app(void *param)
 
 	while (1)
 	{
-		if(runFlag)
+		if(runFlag == 2)
 		{
 			break;
 		}
