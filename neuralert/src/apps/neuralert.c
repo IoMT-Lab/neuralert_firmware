@@ -561,7 +561,7 @@ static void notify_user_LED()
 	} else {
 		if (BIT_SET(processLists, USER_PROCESS_BOOTUP))
 		{
-			setLEDState(YELLOW, LED_SLOW, 200, 0, LED_OFFX, 0, 200); // constant yellow
+			setLEDState(BLUE, LED_SLOW, 200, 0, LED_OFFX, 0, 200); // constant yellow
 		}
 		else // No known state
 		{
@@ -4557,7 +4557,7 @@ void neuralert_app(void *param)
 	//vTaskDelay(10); // delay between obtaining the MAC addr and strcpy (below).  Delay for reset achieves this.
 
 
-	if(runFlag <= 0)
+	if(runFlag <= 1)
 	{
 		// State mechanism isn't up and running yet, so
 		// signal LEDs manually
