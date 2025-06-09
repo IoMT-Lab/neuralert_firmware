@@ -62,6 +62,7 @@
 #include "user_version.h"
 #include "da16x_cert.h"
 
+
 /**
  ********************************************************************************
  * MACROS AND DEFINITIONS

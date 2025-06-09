@@ -43,6 +43,7 @@
 #include "da16x_system.h"
 #include "application.h"
 #include "common_def.h"
+#include "da16x_sntp_client.h"
 
 //#include "sample_defs.h" //JW Added this -- probably could combine
 // by adding the following two lines, I think we can now remove sample_defs.h from our app
@@ -138,8 +139,12 @@ static void user_wifi_conn(void *arg)
 
        if (wifi_conn_ev_bits & WIFI_CONN_SUCC_STA) {
             xEventGroupClearBits(evt_grp_wifi_conn_notify, WIFI_CONN_SUCC_STA);
-
             PRINTF("\n### User Call-back : Success to connect Wi-Fi ...\n");
+
+            if (get_sntp_use() & !is_sntp_sync()) {
+                sntp_sync_now();
+            }
+
             if (check_mqtt_block()) {
                 PRINTF("\n### MQTT block enabled\n");
             } else {
