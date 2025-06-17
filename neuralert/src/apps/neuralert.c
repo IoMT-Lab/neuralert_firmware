@@ -562,7 +562,7 @@ static void notify_user_LED()
 	} else {
 		if (BIT_SET(processLists, USER_PROCESS_BOOTUP))
 		{
-			setLEDState(BLUE, LED_SLOW, 200, 0, LED_OFFX, 0, 200); // constant yellow
+			setLEDState(BLUE, LED_SLOW, 200, 0, LED_OFFX, 0, 3600);
 		}
 		else // No known state
 		{
@@ -576,13 +576,9 @@ static void notify_user_LED()
 }
 
 
-
-
-
-
 /**
  *******************************************************************************
- * @brief Check if the system is in bootup mode
+ * @brief Check if the system is blocking mqtt access (done at bootup)
  *******************************************************************************
  */
 
