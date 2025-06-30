@@ -150,7 +150,6 @@
 #define MQTT_MAX_ATTEMPTS_PER_TX 3
 
 
-
 // Trigger value for the accelerometer to start MQTT transmission
 //  16 ~= 1 minutes
 //  80 ~= 5 minutes
@@ -161,18 +160,18 @@
 // erases the next flash sector before it starts the MQTT task
 // That means that the MQTT task will have 16 AXL interrupt times to
 // operate in before the next erase sector time
-#define MQTT_TRANSMIT_TRIGGER_FIFO_BUFFERS_FAST 16 // 1 minute (assuming 7 Hz AXL sampling rate)
-#define MQTT_TRANSMIT_TRIGGER_FIFO_BUFFERS_SLOW 80 // 5 minutes (assuming 7 Hz AXL sampling rate)
+#define MQTT_TRANSMIT_TRIGGER_FIFO_BUFFERS_MIN 16 // 1 minute (assuming 7 Hz AXL sampling rate)
+#define MQTT_TRANSMIT_TRIGGER_FIFO_BUFFERS_MAX 80 // 5 minutes (assuming 7 Hz AXL sampling rate)
 
+// Controller constants -- error will be less than 1 each iteration (effectively)
+#define MQTT_TRANSMIT_FEEDBACK_GAIN				100  // Needs to be large to drive error to zero
+#define MQTT_TRANSMIT_DELTA_LIMIT				5  // limits the change in the number of ticks needed to trigger a TX
+#define MQTT_TRANSMIT_WEIGHTED_AVERAGE_FACTOR   10 // Value between 0 and 100, determines how responsive we are to changes in monitoring time
 
 // This value if for the first transmission, which we want to occur relatively quickly after bootup.
 // each FIFO trigger is about 4 seconds, so if the following is set to 3, it will start the transmit
 // process within approximately 12 seconds.
 #define MQTT_FIRST_TRANSMIT_TRIGGER_FIFO_BUFFERS 2
-
-// This value is for switching between fast and slow transmit intervals.  When the number of unsuccessful
-// transmissions is less than this value, the fast mode will be used.  Otherwise, the slow mode.
-#define MQTT_TRANSMIT_TRIGGER_FIFO_BUFFERS_TEST 10 // about 10 fast attempts before we revert to slow
 
 // This is how long to wait for MQTT to stop before shutting the wifi down
 // regardless of whether MQTT has cleanly exited.
@@ -233,8 +232,17 @@ typedef struct userData {
 	// The following variable keeps track of the most recent timestamp
 	// assigned to a FIFO buffer
 	__time64_t last_FIFO_read_time_ms;
-	// The following records when we last owk
-	__time64_t last_wakeup_msec;
+	// The following records when we last woke
+	__time64_t last_wakeup_ms;
+	// The following records the total time we've been awake (in ms)
+	__time64_t total_awake_ms;
+	// The following records the previous transmission total time spent awake (in ms)
+	__time64_t last_total_awake_ms;
+	// The following records the previous transmission total time monitoring
+	__time64_t last_total_monitoring_ms;
+	// The following records the moving average of awake percentage
+	double average_awake_percent;
+
 
 	// *****************************************************
 	// MQTT transmission info
@@ -247,7 +255,6 @@ typedef struct userData {
 	unsigned int MQTT_stats_packets_sent_last; // the value of MQTT_stats_packets_sent the last time we checked.
 	unsigned int MQTT_stats_retry_attempts; // # times we've attempted a transmit retry
 	unsigned int MQTT_stats_transmit_success;	// # times we were successful at uploading all the data
-	unsigned int MQTT_attempts_since_tx_success;  // # times MQTT has consecutively failed to transmit
 	int MQTT_tx_attempts_remaining; // # times MQTT can attempt to send this packet
 	unsigned int MQTT_inflight;			// indicates the number of inflight messages
 
@@ -267,6 +274,8 @@ typedef struct userData {
 	// *****************************************************
 	unsigned int ACCEL_read_count;			// how many FIFO reads total
 	unsigned int ACCEL_transmit_trigger;	// count of FIFOs to start transmit
+	int ACCEL_transmit_threshold;			// threshold for starting a transmission
+	int ACCEL_transmit_pid_integral_state;  // state for the PID controller integral gain
 	unsigned int ACCEL_missed_interrupts;	// How many times we detected full FIFO by polling
 
 	// *****************************************************
@@ -915,6 +924,7 @@ int send_json_packet(const int count, const unsigned int transmission, const int
 	int16_t Zvalue;
 	char device_id[10];
 	char timesync[MAX_TIMESYNC_LENGTH];
+	int tx_thres;
 
 
 #ifdef __TIME64__
@@ -934,6 +944,7 @@ int send_json_packet(const int count, const unsigned int transmission, const int
 	} else {
 		strcpy(device_id, pUserData->Device_ID);
 		strcpy(timesync, pUserData->MQTT_timesync_current_time_str);
+		tx_thres = pUserData->ACCEL_transmit_threshold;
 		xSemaphoreGive(User_semaphore);
 	}
 
@@ -1023,10 +1034,16 @@ int send_json_packet(const int count, const unsigned int transmission, const int
 	strcat(mqttMessage, str);
 
 	/*
-	* Meta - time (in minutes) since boot-up
+	* Meta - rssi value at this transmission
 	*/
 	int rssi = get_current_rssi(WLAN0_IFACE);
 	sprintf(str,"\t\t\t\t\"rssi\": %d,\r\n", rssi);
+	strcat(mqttMessage, str);
+
+	/*
+	* Meta - threshold used for next transmission
+	*/
+	sprintf(str,"\t\t\t\t\"thres\": %d,\r\n", tx_thres);
 	strcat(mqttMessage, str);
 
 	/*
@@ -2243,7 +2260,6 @@ static void user_process_send_MQTT_data(void* arg)
 					// if attempts since tx success isn't updated, we'll stay in "fast" transmission mode longer
 				} else {
 					// Do the stats
-					pUserData->MQTT_attempts_since_tx_success = 0; // must be protected by user semaphore
 					pUserData->MQTT_stats_packets_sent++; // must be protected by user semaphore
 					packets_sent++;		// Total packets sent this interval
 					samples_sent += packet_data.num_samples;
@@ -3185,6 +3201,87 @@ static void timesync_snapshot(void)
 	vTaskDelay(3);
 }
 
+/**
+ *******************************************************************************
+ * @brief Logic for adjusting the transmit trigger threshold
+ *
+ *******************************************************************************
+ */
+
+static int user_update_transmit_threshold(void)
+{
+
+	// get current time
+	__time64_t total_monitoring_ms;
+	user_time64_msec_since_poweron(&total_monitoring_ms);
+
+	if (take_semaphore(&User_semaphore)) {
+		PRINTF("\n Neuralert [%s] error taking user semaphore", __func__);
+		// this error will result in no update to the transmission threshold this transmission
+		// This isn't mission critical
+		return pdFALSE;
+	}
+	int transmit_threshold = pUserData->ACCEL_transmit_threshold;
+	__time64_t total_awake_ms = pUserData->total_awake_ms;
+	__time64_t last_total_awake_ms = pUserData->last_total_awake_ms;
+	__time64_t last_total_monitoring_ms = pUserData->last_total_monitoring_ms;
+	double average_awake_percent = pUserData->average_awake_percent;
+	pUserData->last_total_awake_ms = total_awake_ms; // Update here in case the semaphore is blocked below
+	pUserData->last_total_monitoring_ms = total_monitoring_ms; // Update here in case the semaphore is blocked below
+	xSemaphoreGive(User_semaphore);
+
+	// collect reference threshold from NVRAM
+	int target_awake_percent;
+	user_get_int(DA16X_CONF_INT_TARGET_AWAKE_PERCENT, &target_awake_percent);
+
+	// Perform basic error checking
+	if ((total_awake_ms < last_total_awake_ms) ||
+		(total_monitoring_ms < last_total_monitoring_ms) ||
+		((total_awake_ms - last_total_awake_ms) > (total_monitoring_ms - last_total_monitoring_ms))) {
+		PRINTF("\n tx threshold not updated: %ld, %ld, %ld, %ld", total_awake_ms, last_total_awake_ms, total_monitoring_ms, last_total_monitoring_ms);
+		return pdFALSE;
+	}
+
+	// calculate the percent awake during the last transmission
+	int last_awake_percent = (int)(((total_awake_ms - last_total_awake_ms) * 100) / (total_monitoring_ms - last_total_monitoring_ms));
+
+	// Calculate the moving average of time spent awake
+	average_awake_percent = ((100.0 - MQTT_TRANSMIT_WEIGHTED_AVERAGE_FACTOR) * average_awake_percent + MQTT_TRANSMIT_WEIGHTED_AVERAGE_FACTOR * ((double)(last_awake_percent))) / 100.0;
+
+	PRINTF("\n moving average awake percent: %.2f (target = %d, last = %d)", average_awake_percent, target_awake_percent, last_awake_percent);
+
+	// Logic for calculating the change (delta) in transmission trigger
+	double delta = MQTT_TRANSMIT_FEEDBACK_GAIN * ((double)(target_awake_percent) - average_awake_percent) / 100.0;
+	if (delta > 1.0 * MQTT_TRANSMIT_DELTA_LIMIT) {
+		delta = 1.0 * MQTT_TRANSMIT_DELTA_LIMIT;
+	} else if (delta < -1.0 * MQTT_TRANSMIT_DELTA_LIMIT) {
+		delta = -1.0 * MQTT_TRANSMIT_DELTA_LIMIT;
+	}
+	transmit_threshold -= (int)(delta);
+
+	PRINTF("\n tx threshold (pre-saturation): %d, delta: %.2f", transmit_threshold, delta);
+
+	// Bound the transmit threshold
+	if (transmit_threshold <= MQTT_TRANSMIT_TRIGGER_FIFO_BUFFERS_MIN) {
+		transmit_threshold = MQTT_TRANSMIT_TRIGGER_FIFO_BUFFERS_MIN;
+	} else if (transmit_threshold >= MQTT_TRANSMIT_TRIGGER_FIFO_BUFFERS_MAX) {
+		transmit_threshold = MQTT_TRANSMIT_TRIGGER_FIFO_BUFFERS_MAX;
+	}
+
+	// Store the updated transmit threshold
+	if (take_semaphore(&User_semaphore)) {
+		PRINTF("\n Neuralert [%s] error taking user semaphore", __func__);
+		// this error will result in no update to the transmission threshold this transmission
+		// This isn't mission critical, so just return
+		return pdFALSE;
+	}
+	pUserData->ACCEL_transmit_threshold = transmit_threshold;
+	pUserData->average_awake_percent = average_awake_percent;
+	xSemaphoreGive(User_semaphore);
+
+	return pdTRUE;
+}
+
 
 
 /**
@@ -3203,7 +3300,7 @@ static int user_process_read_data(void)
 	signed char rawdata[8];
 	unsigned char fiforeg[2];
 	int storestatus;
-	unsigned int tx_trigger_threshold = MQTT_TRANSMIT_TRIGGER_FIFO_BUFFERS_FAST;
+	unsigned int tx_trigger_threshold = MQTT_TRANSMIT_TRIGGER_FIFO_BUFFERS_MIN;
 	unsigned int tx_trigger_value = 0;
 	uint8_t ISR_reason;
 	__time64_t assigned_timestamp;		// timestamp to assign to FIFO reading
@@ -3318,19 +3415,13 @@ static int user_process_read_data(void)
 		PRINTF(" Total MQTT packets sent                 : %d\n", pUserData->MQTT_stats_packets_sent);
 		PRINTF(" Total MQTT retry attempts               : %d\n", pUserData->MQTT_stats_retry_attempts);
 		PRINTF(" Total MQTT transmit success             : %d\n", pUserData->MQTT_stats_transmit_success);
-		PRINTF(" MQTT tx attempts since tx success       : %d\n", pUserData->MQTT_attempts_since_tx_success);
 		PRINTF(" ------------------------------------------------\n");
 
 
 		// See if it's time to transmit data, based on how many FIFO buffers we've
 		// accumulated since the last transmission
 		tx_trigger_value = ++pUserData->ACCEL_transmit_trigger;  // Increment FIFO stored counter
-
-		if (pUserData->MQTT_attempts_since_tx_success <= MQTT_TRANSMIT_TRIGGER_FIFO_BUFFERS_TEST) {
-			tx_trigger_threshold = MQTT_TRANSMIT_TRIGGER_FIFO_BUFFERS_FAST;
-		} else {
-			tx_trigger_threshold = MQTT_TRANSMIT_TRIGGER_FIFO_BUFFERS_SLOW;
-		}
+		tx_trigger_threshold = pUserData->ACCEL_transmit_threshold;
 
 		xSemaphoreGive(User_semaphore);
 	}
@@ -3342,15 +3433,7 @@ static int user_process_read_data(void)
 	if(tx_trigger_value >= tx_trigger_threshold)
 	{
 
-		// increment MQTT attempt since tx success counter (we're going to try a transmission)
-		if (take_semaphore(&User_semaphore)) {
-			PRINTF("\n Neuralert: [%s] error taking user semaphore", __func__);
-			// not critical to address this.  if we miss too many, then the system will delay entering the
-			// "long" transmission interval.
-		} else {
-			pUserData->MQTT_attempts_since_tx_success++;
-			xSemaphoreGive(User_semaphore);
-		}
+		user_update_transmit_threshold();
 
 
 		// Check if MQTT is still active before starting again
@@ -3549,11 +3632,16 @@ static int user_process_bootup_event(void)
 
 		// Initialize the accelerometer timestamp bookkeeping
 		pUserData->last_FIFO_read_time_ms = 0;
-		pUserData->last_wakeup_msec = 0;
-
+		pUserData->last_wakeup_ms = 0;
+		pUserData->total_awake_ms = 0;
+		pUserData->last_total_awake_ms = 0;
+		pUserData->last_total_monitoring_ms = 0;
+		pUserData->average_awake_percent = 0; // this initialization forces faster transmissions at beginning
 
 		pUserData->ACCEL_missed_interrupts = 0;
-		pUserData->ACCEL_transmit_trigger = MQTT_TRANSMIT_TRIGGER_FIFO_BUFFERS_FAST - MQTT_FIRST_TRANSMIT_TRIGGER_FIFO_BUFFERS;
+		pUserData->ACCEL_transmit_trigger = MQTT_TRANSMIT_TRIGGER_FIFO_BUFFERS_MIN - MQTT_FIRST_TRANSMIT_TRIGGER_FIFO_BUFFERS;
+		pUserData->ACCEL_transmit_threshold = MQTT_TRANSMIT_TRIGGER_FIFO_BUFFERS_MIN;
+		pUserData->ACCEL_transmit_pid_integral_state = 0;
 
 		// Initialize the FIFO interrupt cycle statistics
 		pUserData->FIFO_reads_this_power_cycle = 0;
@@ -3630,7 +3718,7 @@ static UCHAR user_process_event(UINT32 event)
 			PRINTF("\n Neuralert: [%s] error taking user semaphore");
 			// do nothing, just logging
 		} else {
-			user_time64_msec_since_poweron(&(pUserData->last_wakeup_msec));
+			user_time64_msec_since_poweron(&(pUserData->last_wakeup_ms));
 			xSemaphoreGive(User_semaphore);
 		}
 
@@ -3681,7 +3769,8 @@ static UCHAR user_process_event(UINT32 event)
 				// do nothing, just internal logging
 			} else {
 				// Get relative time since power on from the RTC time counter register
-				awake_time = current_msec_since_boot - pUserData->last_wakeup_msec;
+				awake_time = current_msec_since_boot - pUserData->last_wakeup_ms;
+				pUserData->total_awake_ms += awake_time;
 				PRINTF("Entering sleep1. msec awake %u \n\n", awake_time);
 				xSemaphoreGive(User_semaphore);
 			}
@@ -3700,7 +3789,7 @@ static UCHAR user_process_event(UINT32 event)
 				PRINTF("\n Unable to sleep. \n", __func__);
 				// do nothing, just used for logging
 			} else {
-				awake_time = current_msec_since_boot - pUserData->last_wakeup_msec;
+				awake_time = current_msec_since_boot - pUserData->last_wakeup_ms;
 				xSemaphoreGive(User_semaphore);
 				PRINTF("Unable to sleep. msec awake %u\n\n", awake_time);
 			}
