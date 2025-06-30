@@ -219,9 +219,15 @@ user_conf_int user_config_int_with_nvram_name[] = {
 
     /// Auto-run flag. 
     ///-1 == uninitialized; 
-    /// 0 == don't auto-run; 
-    /// 1 == auto-run
-    { DA16X_CONF_INT_RUN_FLAG,  NVRAM_CONFIG_RUN_FLAG,  -1,  1,  -1},
+    /// 0 == perform provisioning step 1;
+    /// 1 == perform provisioning step 2;
+    /// 2 == auto-run;
+    { DA16X_CONF_INT_RUN_FLAG,  NVRAM_CONFIG_RUN_FLAG,  -1,  2,  -1},
+
+    /// Target percentage MCU awake time;
+    /// 17 percent is about 10 seconds every minute
+    { DA16X_CONF_INT_TARGET_AWAKE_PERCENT,  NVRAM_CONFIG_TARGET_AWAKE_PERCENT,  -1,  100,  17},
+
     { 0, "", 0, 0, 0 }
 };
 
@@ -458,11 +464,11 @@ int user_get_int(int name, int *value)
             da16x_get_config_str(LEGACY_DA16X_CONF_STR_MQTT_RUN_FLAG, str);
             PRINTF("NVRam legacy runFlag: %s\r\n",str);
 
-            // If the legacy value was set to 1, initialized our new config to 1,
+            // If the legacy value was set to 2, initialized our new config to 1,
             // otherwise default to 0
-            if(strcmp(str,"runFlag=1") == 0)
+            if(strcmp(str,"runFlag=2") == 0)
             {
-                *value = 1;
+                *value = 2;
             } else {
                 *value = 0;
             }
@@ -471,6 +477,7 @@ int user_get_int(int name, int *value)
             // legacy recovery next time
             da16x_set_config_int(DA16X_CONF_INT_RUN_FLAG, *value);
         }
+
     }
 
     return result;

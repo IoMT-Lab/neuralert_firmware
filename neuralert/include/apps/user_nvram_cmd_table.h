@@ -47,6 +47,8 @@
 #define MQTT_NVRAM_CONFIG_RUN_FLAG		"MQTT_RUN_FLAG"
 /// NVRAM name for int-based run flag
 #define NVRAM_CONFIG_RUN_FLAG           "RUN_FLAG"
+// NVRAM name for the int-based TX in 6.5 days
+#define NVRAM_CONFIG_TARGET_AWAKE_PERCENT "TARGET_AWAKE_PERCENT"
 
 /// NVRAM string value structure
 typedef struct _user_conf_str {
@@ -234,6 +236,7 @@ typedef enum {
 #endif //(__SUPPORT_OTA__)
 
     DA16X_CONF_INT_RUN_FLAG,
+    DA16X_CONF_INT_TARGET_AWAKE_PERCENT,
     DA16X_CONF_INT_FINAL_MAX
 } DA16X_USER_CONF_INT;
 
