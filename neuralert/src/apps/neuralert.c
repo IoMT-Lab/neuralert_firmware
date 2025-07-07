@@ -39,12 +39,9 @@
 #include "da16x_network_common.h"
 #include "da16x_system.h"
 #include "da16x_time.h"
-#include "da16200_map.h"
 #include "iface_defs.h"
 #include "lwip/sockets.h"
 #include "task.h"
-#include "user_dpm.h"
-#include "user_dpm_api.h"
 #ifdef CFG_USE_RETMEM_WITHOUT_DPM
 #include "user_retmem.h"
 #endif //CFG_USE_RETMEM_WITHOUT_DPM
@@ -934,7 +931,6 @@ int send_json_packet(const int count, const unsigned int transmission, const int
 #endif /* __TIME64__ */
 	struct tm;
 	char nowStr[20];
-	unsigned char fault_count;
 
 	// get data from user memory
 	if (take_semaphore(&User_semaphore)) {
@@ -1018,12 +1014,6 @@ int send_json_packet(const int count, const unsigned int transmission, const int
 	sprintf(str,"\t\t\t\t\"bat\": %d,\r\n",adcData);
 	strcat(mqttMessage, str);
 
-	/*
-	* Meta - Fault count at this transmission
-	*/
-	fault_count = get_fault_count();
-	sprintf(str,"\t\t\t\t\"count\": %d,\r\n", (uint16_t)fault_count);
-	strcat(mqttMessage, str);
 
 	/*
 	* Meta - time (in minutes) since boot-up
