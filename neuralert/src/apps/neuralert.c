@@ -4011,6 +4011,9 @@ static int neuralert_provisioning_step1(const char *_recData, char *reply_buf, u
 
 	PRINTF("Retrieving Device Request ... \r\n");
     cur_json = cJSON_Parse(_recData);
+	if (!cur_json) {
+		goto end_of_task;
+	}
 
 	if (cur_json->type != cJSON_Object) {
 		PRINTF("[%s]: type: %d, expected %d\r\n", __func__, cur_json->type, cJSON_Object);
@@ -4086,6 +4089,9 @@ static int neuralert_provisioning_step2(const char *_recData)
 
 	PRINTF("Executing Provisioning ... \r\n");
     json_recv_data = cJSON_Parse(_recData);
+	if (!json_recv_data) {
+		goto end_of_task;
+	}
 
 	if (json_recv_data->type != cJSON_Object) {
 		PRINTF("[%s]: type: %d, expected %d\r\n", __func__, json_recv_data->type, cJSON_Object);
