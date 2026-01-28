@@ -4329,7 +4329,7 @@ void tcp_server_thread(void *arg)
 
             PRINTF("< Read from client: ");
 
-            len = recv(client_sock, data_buffer, sizeof(data_buffer), 0);
+            len = recv(client_sock, data_buffer, sizeof(data_buffer) - 1, 0);
             if (len <= 0) {
                 PRINTF("[%s] Failed to receive data(%d)\r\n", __func__, len);
                 break;
@@ -4346,23 +4346,25 @@ void tcp_server_thread(void *arg)
 				msg_len = (data_buffer[0] << 24) + (data_buffer[1] << 16) + (data_buffer[2] << 8) + data_buffer[3];
 				PRINTF("Size of incoming message: (%d) (%x %x %x %x)\n", msg_len, data_buffer[0],
 					data_buffer[1], data_buffer[2], data_buffer[3]);
+
+				// Cap msg_len to maximum buffer size
+				if (msg_len > TCP_SERVER_DEF_BUF_SIZE) {
+					msg_len = TCP_SERVER_DEF_BUF_SIZE;
+				}
+
 				vTaskDelay(3);
 
 				// initialize message buffer
 				msg_buf = pvPortMalloc(msg_len + 1);
-				memset(msg_buf, 0x00, sizeof(msg_buf));
+				memset(msg_buf, 0x00, msg_len + 1);
 
 				// copy the buffer data to msg_buf (minus the first four bytes)
-				for (int i = 4; i < len; i++) {
-					msg_buf[i-4] = data_buffer[i];
-				}
+				memcpy(msg_buf, data_buffer + 4, len - 4);
 				msg_pos += (len - 4);
 			} else {
 
 				// copy the buffer data to msg_buf
-				for (int i = 0; i < len; i++) {
-					msg_buf[i+msg_pos] = data_buffer[i];
-				}
+				memcpy(msg_buf + msg_pos, data_buffer, len);
 				msg_pos += len;
 			}
 
