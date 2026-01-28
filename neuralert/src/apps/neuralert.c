@@ -49,6 +49,7 @@
 #include "user_nvram_cmd_table.h"
 #include "util_api.h"
 #include "limits.h"
+#include <stdint.h>
 #include "W25QXX.h"
 #include "Mc363x.h"
 #include "adc.h"
@@ -4346,6 +4347,12 @@ void tcp_server_thread(void *arg)
 				msg_len = (data_buffer[0] << 24) + (data_buffer[1] << 16) + (data_buffer[2] << 8) + data_buffer[3];
 				PRINTF("Size of incoming message: (%d) (%x %x %x %x)\n", msg_len, data_buffer[0],
 					data_buffer[1], data_buffer[2], data_buffer[3]);
+
+				// Guard against integer overflow on msg_len + 1
+				if (msg_len == UINT32_MAX) {
+					PRINTF("[%s] Invalid message length\r\n", __func__);
+					break;
+				}
 
 				// Cap msg_len to maximum buffer size
 				if (msg_len > TCP_SERVER_DEF_BUF_SIZE) {
