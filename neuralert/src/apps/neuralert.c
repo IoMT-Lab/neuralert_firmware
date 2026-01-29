@@ -58,6 +58,11 @@
 #include "json.h"
 #include "user_version.h"
 #include "da16x_cert.h"
+#include "mbedtls/pk.h"
+#include "mbedtls/sha256.h"
+#include "mbedtls/ecdsa.h"
+#include "mbedtls/base64.h"
+#include "da16x_rng.h"
 
 
 /**
@@ -95,8 +100,17 @@
 /* Retention Memory */
 #define USER_RTM_DATA_TAG						"uRtmData"
 
-/* Provisioning key */
-#define USER_PROVISIONING_KEY "E72ttV0Ydp3"
+/* ECDSA P-256 public key for provisioning authentication */
+static const char PROVISIONING_PUBLIC_KEY_PEM[] =
+    "-----BEGIN PUBLIC KEY-----\n"
+    "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEdjV59fXoBsraIvL+afY7Uyg5Cynd\n"
+    "QCfGu64sgvNOVhq1Dgm3rgxgLIibYJBO06cYve0adJxKR1X6xavEKctZkw==\n"
+    "-----END PUBLIC KEY-----\n";
+
+#define AUTH_NONCE_SIZE 32
+#define AUTH_NONCE_TIMEOUT_SEC 60
+#define AUTH_SIGNATURE_MAX_SIZE 128
+#define AUTH_BASE64_NONCE_SIZE ((AUTH_NONCE_SIZE * 4 / 3) + 4)
 
 /*
  * Accelerometer buffer (AB) setup
@@ -378,6 +392,13 @@ static accelDataStruct accelXmitData[MAX_SAMPLES_PER_PACKET];
 #define MAX_JSON_STRING_SIZE 10000 // double our usual packet size
 char mqttMessage[MAX_JSON_STRING_SIZE];
 
+/*
+ * Provisioning authentication state
+ * Used for ECDSA challenge-response authentication
+ */
+static unsigned char prov_auth_nonce[AUTH_NONCE_SIZE];
+static uint32_t prov_auth_nonce_time = 0;
+static int prov_auth_challenge_pending = 0;
 
 
 #ifdef CFG_USE_RETMEM_WITHOUT_DPM
@@ -418,6 +439,9 @@ static int user_mqtt_send_message(void);
 static int take_semaphore(SemaphoreHandle_t *);
 static void timesync_snapshot(void);
 static void user_reboot(void);
+static int generate_auth_nonce(unsigned char *nonce, size_t len);
+static int verify_provisioning_signature(const unsigned char *nonce, size_t nonce_len,
+    const char *mac_addr, const unsigned char *signature, size_t sig_len);
 
 
 /*
@@ -3995,6 +4019,101 @@ static void user_reboot(void)
 }
 
 
+/**
+ ****************************************************************************************
+ * @brief Generate a random nonce for authentication challenge
+ * @param[out] nonce  Buffer to store the generated nonce
+ * @param[in] len  Length of nonce to generate
+ * @return  0 on success, non-zero on failure
+ ****************************************************************************************
+ */
+static int generate_auth_nonce(unsigned char *nonce, size_t len)
+{
+	size_t i;
+
+	for (i = 0; i < len; i += sizeof(UINT32)) {
+		UINT32 rand_val = da16x_random();
+		size_t copy_len = (len - i < sizeof(UINT32)) ? (len - i) : sizeof(UINT32);
+		memcpy(nonce + i, &rand_val, copy_len);
+	}
+
+	return 0;
+}
+
+
+/**
+ ****************************************************************************************
+ * @brief Verify ECDSA signature for provisioning authentication
+ * @param[in] nonce  The challenge nonce
+ * @param[in] nonce_len  Length of the nonce
+ * @param[in] mac_addr  Device MAC address string
+ * @param[in] signature  The signature to verify
+ * @param[in] sig_len  Length of the signature
+ * @return  0 if signature is valid, non-zero otherwise
+ ****************************************************************************************
+ */
+static int verify_provisioning_signature(
+    const unsigned char *nonce, size_t nonce_len,
+    const char *mac_addr, const unsigned char *signature, size_t sig_len)
+{
+	int ret = -1;
+	mbedtls_pk_context pk;
+	unsigned char hash[32];
+	mbedtls_sha256_context sha256_ctx;
+
+	mbedtls_pk_init(&pk);
+	mbedtls_sha256_init(&sha256_ctx);
+
+	/* Parse the embedded public key */
+	ret = mbedtls_pk_parse_public_key(&pk,
+	    (const unsigned char *)PROVISIONING_PUBLIC_KEY_PEM,
+	    strlen(PROVISIONING_PUBLIC_KEY_PEM) + 1);
+	if (ret != 0) {
+		PRINTF("[%s] Failed to parse public key: -0x%04x\r\n", __func__, -ret);
+		goto cleanup;
+	}
+
+	/* Verify the key is ECDSA capable */
+	if (!mbedtls_pk_can_do(&pk, MBEDTLS_PK_ECDSA)) {
+		PRINTF("[%s] Key is not ECDSA capable\r\n", __func__);
+		ret = -1;
+		goto cleanup;
+	}
+
+	/* Compute SHA256(nonce || MAC) */
+	mbedtls_sha256_starts_ret(&sha256_ctx, 0);
+	mbedtls_sha256_update_ret(&sha256_ctx, nonce, nonce_len);
+	mbedtls_sha256_update_ret(&sha256_ctx, (const unsigned char *)mac_addr,
+	    strlen(mac_addr));
+	mbedtls_sha256_finish(&sha256_ctx, hash);
+
+	/* Verify the signature */
+	ret = mbedtls_pk_verify(&pk, MBEDTLS_MD_SHA256, hash, sizeof(hash),
+	    signature, sig_len);
+	if (ret != 0) {
+		PRINTF("[%s] Signature verification failed: -0x%04x\r\n", __func__, -ret);
+	}
+
+cleanup:
+	mbedtls_sha256_free(&sha256_ctx);
+	mbedtls_pk_free(&pk);
+	return ret;
+}
+
+
+/**
+ ****************************************************************************************
+ * @brief Get current time in seconds for nonce timeout checking
+ * @return  Current time in seconds since power on
+ ****************************************************************************************
+ */
+static uint32_t get_current_time_sec(void)
+{
+	__time64_t cur_msec;
+	user_time64_msec_since_poweron(&cur_msec);
+	return (uint32_t)(cur_msec / 1000);
+}
+
 
 /**
  ****************************************************************************************
@@ -4006,56 +4125,158 @@ static void user_reboot(void)
 static int neuralert_provisioning_step1(const char *_recData, char *reply_buf, uint32_t *reply_len)
 {
 	int return_val = pdTRUE;
-	cJSON *cur_json = NULL;
+	cJSON *root_json = NULL;
+	cJSON *auth_json = NULL;
+	cJSON *sig_json = NULL;
+	cJSON *id_json = NULL;
+	char nonce_base64[AUTH_BASE64_NONCE_SIZE + 1];
+	size_t nonce_base64_len = 0;
+	unsigned char sig_decoded[AUTH_SIGNATURE_MAX_SIZE];
+	size_t sig_decoded_len = 0;
+	uint32_t current_time;
+	int ret;
 
 
-	PRINTF("Retrieving Device Request ... \r\n");
-    cur_json = cJSON_Parse(_recData);
+	PRINTF("Provisioning Step 1: Processing request ... \r\n");
+	root_json = cJSON_Parse(_recData);
 
-	if (cur_json->type != cJSON_Object) {
-		PRINTF("[%s]: type: %d, expected %d\r\n", __func__, cur_json->type, cJSON_Object);
+	if (root_json == NULL || root_json->type != cJSON_Object) {
+		PRINTF("[%s]: Failed to parse JSON or not an object\r\n", __func__);
 		goto end_of_task;
 	}
 
-	// Dictionary with an Entry corresponding to "KEY"
-	cur_json = cur_json->child;
-	while (cur_json != NULL) {
-		if (cur_json->string == NULL) {
-			PRINTF("[%s] key value not specified (must be KEY)\r\n", __func__);
+	/* Check for AUTH field (challenge request) */
+	auth_json = cJSON_GetObjectItem(root_json, "AUTH");
+	if (auth_json != NULL) {
+		if (auth_json->type != cJSON_String) {
+			PRINTF("[%s]: AUTH value must be a string\r\n", __func__);
 			goto end_of_task;
 		}
 
+		if (strcmp(auth_json->valuestring, "CHALLENGE") == 0) {
+			PRINTF("Challenge request received, generating nonce...\r\n");
 
-		if (strcmp(cur_json->string, "KEY") == 0) {
-			if (cur_json->type != cJSON_String) {
-				PRINTF("[%s]: value type: %d, expected %d\r\n", __func__,  cur_json->type, cJSON_String);
+			/* Generate random nonce */
+			ret = generate_auth_nonce(prov_auth_nonce, AUTH_NONCE_SIZE);
+			if (ret != 0) {
+				PRINTF("[%s]: Failed to generate nonce\r\n", __func__);
 				goto end_of_task;
 			}
 
-			if (strcmp(cur_json->valuestring, USER_PROVISIONING_KEY) == 0) {
-				PRINTF("Provided key matches, reply with device info\r\n");
+			/* Record timestamp for timeout checking */
+			prov_auth_nonce_time = get_current_time_sec();
+			prov_auth_challenge_pending = 1;
 
-				*reply_len = sprintf(reply_buf,"{\"software\":\"%s\",\"version\":\"%s\",\"build\":\"%s %s\",\"id\":\"%s\"}",
-	USER_SOFTWARE_PART_NUMBER_STRING, USER_VERSION_STRING, __DATE__, __TIME__, MACaddr);
-
-			} else {
-				PRINTF("[%s] key is incorrect\r\n", __func__);
+			/* Base64 encode the nonce */
+			ret = mbedtls_base64_encode(
+			    (unsigned char *)nonce_base64, sizeof(nonce_base64),
+			    &nonce_base64_len, prov_auth_nonce, AUTH_NONCE_SIZE);
+			if (ret != 0) {
+				PRINTF("[%s]: Failed to base64 encode nonce\r\n", __func__);
+				prov_auth_challenge_pending = 0;
 				goto end_of_task;
 			}
+			nonce_base64[nonce_base64_len] = '\0';
+
+			/* Reply with challenge */
+			*reply_len = sprintf(reply_buf,
+			    "{\"CHALLENGE\":\"%s\",\"id\":\"%s\"}",
+			    nonce_base64, MACaddr);
+
+			PRINTF("Challenge sent: nonce=%s, id=%s\r\n", nonce_base64, MACaddr);
+			return_val = pdFALSE;
+			goto end_of_task;
 		} else {
-			PRINTF("[%s] Unknown string (must be KEY): %s\r\n", __func__, cur_json->string);
+			PRINTF("[%s]: Unknown AUTH value: %s\r\n", __func__,
+			    auth_json->valuestring);
 			goto end_of_task;
 		}
-
-		cur_json = cur_json->next;
 	}
 
-	return_val = pdFALSE;
+	/* Check for SIGNATURE field (authentication response) */
+	sig_json = cJSON_GetObjectItem(root_json, "SIGNATURE");
+	if (sig_json != NULL) {
+		if (sig_json->type != cJSON_String) {
+			PRINTF("[%s]: SIGNATURE value must be a string\r\n", __func__);
+			goto end_of_task;
+		}
+
+		/* Verify we have a pending challenge */
+		if (!prov_auth_challenge_pending) {
+			PRINTF("[%s]: No challenge pending\r\n", __func__);
+			goto end_of_task;
+		}
+
+		/* Check for timeout */
+		current_time = get_current_time_sec();
+		if ((current_time - prov_auth_nonce_time) > AUTH_NONCE_TIMEOUT_SEC) {
+			PRINTF("[%s]: Challenge expired (elapsed: %u sec)\r\n", __func__,
+			    current_time - prov_auth_nonce_time);
+			prov_auth_challenge_pending = 0;
+			goto end_of_task;
+		}
+
+		/* Get the ID field */
+		id_json = cJSON_GetObjectItem(root_json, "id");
+		if (id_json == NULL || id_json->type != cJSON_String) {
+			PRINTF("[%s]: Missing or invalid 'id' field\r\n", __func__);
+			goto end_of_task;
+		}
+
+		/* Verify the ID matches our MAC */
+		if (strcmp(id_json->valuestring, MACaddr) != 0) {
+			PRINTF("[%s]: ID mismatch: expected %s, got %s\r\n", __func__,
+			    MACaddr, id_json->valuestring);
+			prov_auth_challenge_pending = 0;
+			goto end_of_task;
+		}
+
+		/* Decode the base64 signature */
+		ret = mbedtls_base64_decode(sig_decoded, sizeof(sig_decoded),
+		    &sig_decoded_len,
+		    (const unsigned char *)sig_json->valuestring,
+		    strlen(sig_json->valuestring));
+		if (ret != 0) {
+			PRINTF("[%s]: Failed to decode signature: %d\r\n", __func__, ret);
+			prov_auth_challenge_pending = 0;
+			goto end_of_task;
+		}
+
+		/* Verify the signature */
+		ret = verify_provisioning_signature(
+		    prov_auth_nonce, AUTH_NONCE_SIZE,
+		    MACaddr, sig_decoded, sig_decoded_len);
+
+		/* Clear the challenge state regardless of result */
+		prov_auth_challenge_pending = 0;
+		memset(prov_auth_nonce, 0, AUTH_NONCE_SIZE);
+
+		if (ret != 0) {
+			PRINTF("[%s]: Signature verification failed\r\n", __func__);
+			goto end_of_task;
+		}
+
+		PRINTF("Signature verified, replying with device info\r\n");
+
+		/* Authentication successful - reply with device info */
+		*reply_len = sprintf(reply_buf,
+		    "{\"software\":\"%s\",\"version\":\"%s\",\"build\":\"%s %s\",\"id\":\"%s\"}",
+		    USER_SOFTWARE_PART_NUMBER_STRING, USER_VERSION_STRING,
+		    __DATE__, __TIME__, MACaddr);
+
+		return_val = pdFALSE;
+		goto end_of_task;
+	}
+
+	/* No valid authentication field found */
+	PRINTF("[%s]: No AUTH or SIGNATURE field found in request\r\n", __func__);
 
 end_of_task:
 
-    cJSON_Delete(cur_json);
-    return return_val;
+	if (root_json != NULL) {
+		cJSON_Delete(root_json);
+	}
+	return return_val;
 }
 
 
