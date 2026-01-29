@@ -208,11 +208,11 @@ static void user_wifi_disconn(void *arg)
                                        pdFALSE,
                                        WIFI_CONN_NOTI_WAIT_TICK);
 
-       if (wifi_conn_ev_bits == WIFI_CONN_FAIL_STA) {
+       if (wifi_conn_ev_bits == WIFI_DISCONN_STA) {
             xEventGroupClearBits(evt_grp_wifi_conn_notify, WIFI_DISCONN_STA);
 
             PRINTF("\n### User Call-back : Wi-Fi disconnected ( reason_code = %d ) ...\n", wifi_disconn_reason);
-       } else if (wifi_conn_ev_bits == WIFI_CONN_FAIL_SOFTAP) {
+       } else if (wifi_conn_ev_bits == WIFI_DISCONN_SOFTAP) {
             xEventGroupClearBits(evt_grp_wifi_conn_notify, WIFI_DISCONN_SOFTAP);
 
             PRINTF("\n### User Call-back : Disassociated because STA has left ( reason_code = %d ) ...\n", ap_wifi_disconn_reason);
