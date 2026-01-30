@@ -91,7 +91,7 @@ HANDLE flash_open(UINT32 spi_clock, UINT32 spi_cs) {
 	}
 
 	if (_spi_flash_semaphore == NULL) {
-		 vSemaphoreCreateBinary(_spi_flash_semaphore);
+		_spi_flash_semaphore = xSemaphoreCreateBinary();
 	}
 	configASSERT(_spi_flash_semaphore);
 //	configASSERT(xSemaphoreTake(_spi_flash_semaphore, 10000 / portTICK_PERIOD_MS) == pdTRUE);
