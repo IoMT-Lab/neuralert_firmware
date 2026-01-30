@@ -453,10 +453,20 @@ void trigger_mcu_wakeup_gpio(void)
         _da16x_io_pinmux(PIN_FMUX, FMUX_GPIO);
 
         gpio = GPIO_CREATE(GPIO_UNIT_A);
-        GPIO_INIT(gpio);
+        if (gpio == NULL) {
+            PRINTF("[%s] GPIO_CREATE(GPIO_UNIT_A) failed\n", __func__);
+            return;
+        }
+        if (!GPIO_INIT(gpio)) {
+            PRINTF("[%s] GPIO_INIT(gpio) failed\n", __func__);
+            return;
+        }
 
         pin = GPIO_PIN11;
-        GPIO_IOCTL(gpio, GPIO_SET_OUTPUT, &pin);
+        if (!GPIO_IOCTL(gpio, GPIO_SET_OUTPUT, &pin)) {
+            PRINTF("[%s] GPIO_IOCTL(gpio, GPIO_SET_OUTPUT) failed\n", __func__);
+            return;
+        }
 
         PRINTF("Waking up MCU ...\n");
         write_data = GPIO_PIN11;

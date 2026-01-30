@@ -63,28 +63,51 @@ int set_gpio_interrupt(void)
         return FALSE;
     }
 
-    GPIO_INIT(hgpio);
-    GPIO_IOCTL(hgpio, GPIO_SET_INPUT, &io);
+    if (!GPIO_INIT(hgpio)) {
+        PRINTF("[%s] GPIO_INIT failed\n", __func__);
+        return FALSE;
+    }
 
-    GPIO_IOCTL(hgpio, GPIO_GET_INTR_MODE, &ioctldata[0]);
+    if (!GPIO_IOCTL(hgpio, GPIO_SET_INPUT, &io)) {
+        PRINTF("[%s] GPIO_SET_INPUT failed\n", __func__);
+        return FALSE;
+    }
+
+    if (!GPIO_IOCTL(hgpio, GPIO_GET_INTR_MODE, &ioctldata[0])) {
+        PRINTF("[%s] GPIO_GET_INTR_MODE failed\n", __func__);
+        return FALSE;
+    }
 
     ioctldata[0] |= (UINT32)io;         // 1 edge, 0 level
     ioctldata[1] &= ~(UINT32)io;        // 1 high, 0 low
-    GPIO_IOCTL(hgpio, GPIO_SET_INTR_MODE, &ioctldata[0]);
+
+    if (!GPIO_IOCTL(hgpio, GPIO_SET_INTR_MODE, &ioctldata[0])) {
+        PRINTF("[%s] GPIO_SET_INTR_MODE failed\n", __func__);
+        return FALSE;
+    }
 
 #ifdef __SUPPORT_WPS_BTN__
     ioctldata[0] = (UINT32)(0x01 << wps_btn);
     ioctldata[1] = (UINT32)gpio_callback;
     ioctldata[2] = (UINT32)wps_btn;
-    GPIO_IOCTL(hgpio, GPIO_SET_CALLACK, ioctldata);
+    if (!GPIO_IOCTL(hgpio, GPIO_SET_CALLACK, ioctldata)) {
+        PRINTF("[%s] GPIO_SET_CALLACK (wps_btn) failed\n", __func__);
+        return FALSE;
+    }
 #endif /* __SUPPORT_WPS_BTN__ */
 
     ioctldata[0] = (UINT32)(0x01 << factory_rst_btn);
     ioctldata[1] = (UINT32)gpio_callback;
     ioctldata[2] = (UINT32)factory_rst_btn;
-    GPIO_IOCTL(hgpio, GPIO_SET_CALLACK, ioctldata);
+    if (!GPIO_IOCTL(hgpio, GPIO_SET_CALLACK, ioctldata)) {
+        PRINTF("[%s] GPIO_SET_CALLACK (factory_rst_btn) failed\n", __func__);
+        return FALSE;
+    }
 
-    GPIO_IOCTL(hgpio, GPIO_SET_INTR_ENABLE, &io);
+    if (!GPIO_IOCTL(hgpio, GPIO_SET_INTR_ENABLE, &io)) {
+        PRINTF("[%s] GPIO_SET_INTR_ENABLE failed\n", __func__);
+        return FALSE;
+    }
 
     return TRUE;
 }
