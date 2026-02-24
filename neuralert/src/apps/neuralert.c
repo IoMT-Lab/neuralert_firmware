@@ -3462,7 +3462,10 @@ static int user_process_read_data(void)
 					xSemaphoreGive(User_semaphore);
 					user_terminate_transmit();
 				}
-				xSemaphoreGive(User_semaphore);
+				// Release semaphore if has not already been released yet.
+				if (!take_semaphore(&User_semaphore)) {
+					xSemaphoreGive(User_semaphore);
+				}
 			}
 		} else {
 			// Send the event that will start the MQTT transmit task
