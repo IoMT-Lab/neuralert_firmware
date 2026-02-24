@@ -123,10 +123,20 @@ int config_pin_mux(void)
 	uint16_t write_data_blue;
 
 	gpioc = GPIO_CREATE(GPIO_UNIT_C);
-	GPIO_INIT(gpioc);
+	if (gpioc == NULL) {
+		PRINTF("[%s] GPIO_CREATE(GPIO_UNIT_C) failed\n", __func__);
+		return FALSE;
+	}
+	if (!GPIO_INIT(gpioc)) {
+		PRINTF("[%s] GPIO_INIT(gpioc) failed\n", __func__);
+		return FALSE;
+	}
 
 	pin = GPIO_PIN6 | GPIO_PIN7 | GPIO_PIN8;
-	GPIO_IOCTL(gpioc, GPIO_SET_OUTPUT, &pin);
+	if (!GPIO_IOCTL(gpioc, GPIO_SET_OUTPUT, &pin)) {
+		PRINTF("[%s] GPIO_IOCTL(gpioc, GPIO_SET_OUTPUT) failed\n", __func__);
+		return FALSE;
+	}
 
 	write_data_red = GPIO_PIN6;
 	write_data_green = GPIO_PIN7;
@@ -144,12 +154,22 @@ int config_pin_mux(void)
 	 * GPIOA port init
 	 */
 	gpioa = GPIO_CREATE(GPIO_UNIT_A);
-	GPIO_INIT(gpioa);
+	if (gpioa == NULL) {
+		PRINTF("[%s] GPIO_CREATE(GPIO_UNIT_A) failed\n", __func__);
+		return FALSE;
+	}
+	if (!GPIO_INIT(gpioa)) {
+		PRINTF("[%s] GPIO_INIT(gpioa) failed\n", __func__);
+		return FALSE;
+	}
 	/*
 	 * GPIOA[10] output high
 	 */
 	pin = GPIO_PIN10;
-	GPIO_IOCTL(gpioa, GPIO_SET_OUTPUT, &pin);
+	if (!GPIO_IOCTL(gpioa, GPIO_SET_OUTPUT, &pin)) {
+		PRINTF("[%s] GPIO_IOCTL(gpioa, GPIO_SET_OUTPUT) failed\n", __func__);
+		return FALSE;
+	}
 
 	//  Set GPIO_0 (ADC_CH0), GPIO_1(ADC_CH1)
 	_da16x_io_pinmux(PIN_AMUX, AMUX_AD12);
