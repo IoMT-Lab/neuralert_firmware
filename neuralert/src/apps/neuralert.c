@@ -2906,6 +2906,11 @@ static int user_erase_flash_sector(HANDLE SPI, ULONG SectorEraseAddr)
 		} // semaphore was obtained
 	} // for rerunCount < max retries
 
+	// Ensure retry_count is within expected bounds
+	if (retry_count > AB_ERASE_MAX_ATTEMPTS) {
+		retry_count = AB_ERASE_MAX_ATTEMPTS;
+	}
+
 	//do some logging
 	if (take_semaphore(&User_semaphore)) {
 		PRINTF("\n Neuralert: [%s] error taking user semaphore",__func__);
@@ -3060,6 +3065,11 @@ static int user_process_write_to_flash(accelBufferStruct *pFIFOdata, int *did_an
 			}
 		}
 	} // for rerunCount < max retries
+
+	// Ensure retry_count is within expected bounds
+	if (retry_count > AB_WRITE_MAX_ATTEMPTS) {
+		retry_count = AB_WRITE_MAX_ATTEMPTS;
+	}
 
 	// do some logging
 	if (take_semaphore(&User_semaphore)) {
