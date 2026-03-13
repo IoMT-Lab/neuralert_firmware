@@ -126,10 +126,11 @@ int config_pin_mux(void)
 	if (gpioc == NULL) {
 		PRINTF("[%s] GPIO_CREATE(GPIO_UNIT_C) failed\n", __func__);
 		return FALSE;
-	}
+	} 
+
 	if (!GPIO_INIT(gpioc)) {
-		PRINTF("[%s] GPIO_INIT(gpioc) failed\n", __func__);
-		return FALSE;
+		// GPIO_INIT will fail if the GPIO_UNIT_C was already initialized, we can ignore since gpioc is not NULL
+		PRINTF("[%s] GPIO_INIT(gpioc) already initialized\n", __func__);
 	}
 
 	pin = GPIO_PIN6 | GPIO_PIN7 | GPIO_PIN8;
@@ -159,8 +160,8 @@ int config_pin_mux(void)
 		return FALSE;
 	}
 	if (!GPIO_INIT(gpioa)) {
-		PRINTF("[%s] GPIO_INIT(gpioa) failed\n", __func__);
-		return FALSE;
+		// GPIO_INIT will fail if the GPIO_UNIT_A was already initialized, we can ignore since gpioa is not NULL
+		PRINTF("[%s] GPIO_INIT(gpioa) already initialized\n", __func__);
 	}
 	/*
 	 * GPIOA[10] output high

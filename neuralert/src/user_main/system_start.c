@@ -458,8 +458,8 @@ void trigger_mcu_wakeup_gpio(void)
             return;
         }
         if (!GPIO_INIT(gpio)) {
-            PRINTF("[%s] GPIO_INIT(gpio) failed\n", __func__);
-            return;
+            // GPIO_INIT will fail if the GPIO_UNIT_A was already initialized, we can ignore since gpio is not NULL
+            PRINTF("[%s] GPIO_INIT(gpio) already initialized\n", __func__);
         }
 
         pin = GPIO_PIN11;
