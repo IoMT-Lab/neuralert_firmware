@@ -64,8 +64,8 @@ int set_gpio_interrupt(void)
     }
 
     if (!GPIO_INIT(hgpio)) {
-        PRINTF("[%s] GPIO_INIT failed\n", __func__);
-        return FALSE;
+        // GPIO_INIT will fail if the GPIO_UNIT_A was already initialized, we can ignore since hgpio is not NULL
+        PRINTF("[%s] GPIO_INIT(hgpio) already initialized\n", __func__);
     }
 
     if (!GPIO_IOCTL(hgpio, GPIO_SET_INPUT, &io)) {
