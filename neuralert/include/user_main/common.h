@@ -482,8 +482,12 @@ typedef uint32_t _AB_transmit_map_t;
 #define TCP_CLIENT_DEF_SERVER_PORT		TCP_SERVER_DEF_PORT
 
 #define TCP_PROVISION_PORT_NUM			9999
-#define PROVISION_TCP_RX_BUF_SZ			1024
 
+// This is the size of the buffer for receiving provisioning data over TCP.  
+// It needs to be large enough to hold the provisioning data, which includes the WiFi SSID and password, 
+// and any other configuration data we want to send during provisioning.  
+// The exact size needed will depend on the format of the provisioning data, but 10 KB should be sufficient for typical use cases.
+#define PROVISION_TCP_RX_BUF_SZ			(1024 * 10) 
 
 // Provisioning Defs
 #define APP_SOFTAP_PROV_NAME			"APROV_TCP"
