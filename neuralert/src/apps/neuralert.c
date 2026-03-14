@@ -3457,14 +3457,11 @@ static int user_process_read_data(void)
 				unsigned int packets_sent = pUserData->MQTT_stats_packets_sent;
 				if (packets_sent > pUserData->MQTT_stats_packets_sent_last) {
 					pUserData->MQTT_stats_packets_sent_last = packets_sent; //
+					xSemaphoreGive(User_semaphore);
 				} else {
 					PRINTF("\n MQTT task still active and not making progress. Stopping transmission.");
 					xSemaphoreGive(User_semaphore);
 					user_terminate_transmit();
-				}
-				// Release semaphore if has not already been released yet.
-				if (!take_semaphore(&User_semaphore)) {
-					xSemaphoreGive(User_semaphore);
 				}
 			}
 		} else {
