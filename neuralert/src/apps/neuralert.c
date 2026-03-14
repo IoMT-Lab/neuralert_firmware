@@ -4374,8 +4374,9 @@ void tcp_server_thread(void *arg)
 				}
 
 				// Cap msg_len to maximum buffer size
-				if (msg_len > TCP_SERVER_DEF_BUF_SIZE) {
-					msg_len = TCP_SERVER_DEF_BUF_SIZE;
+				if (msg_len > PROVISION_TCP_RX_BUF_SZ) {
+					PRINTF("[%s] Provisioning Message too long -- aborting: %d > %d\r\n", __func__, msg_len, PROVISION_TCP_RX_BUF_SZ);
+					break;
 				}
 
 				vTaskDelay(3);
