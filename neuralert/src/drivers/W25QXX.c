@@ -94,6 +94,9 @@ HANDLE flash_open(UINT32 spi_clock, UINT32 spi_cs) {
 		_spi_flash_semaphore = xSemaphoreCreateBinary();
 	}
 	configASSERT(_spi_flash_semaphore);
+
+
+	
 //	configASSERT(xSemaphoreTake(_spi_flash_semaphore, 10000 / portTICK_PERIOD_MS) == pdTRUE);
 	xSemaphoreTake(_spi_flash_semaphore, portMAX_DELAY);
 
