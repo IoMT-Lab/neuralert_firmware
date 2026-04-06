@@ -911,8 +911,11 @@ static int get_battery_voltage()
  *******************************************************************************
  */
 
-int send_json_packet(const int count, const unsigned int transmission, const int sequence)
+int send_json_packet(int count, const unsigned int transmission, const int sequence)
 {
+	if (count > MAX_SAMPLES_PER_PACKET) {
+		count = MAX_SAMPLES_PER_PACKET;
+	}
 
 	int return_status = 0;
 	int i;
@@ -939,8 +942,10 @@ int send_json_packet(const int count, const unsigned int transmission, const int
 		PRINTF("\n Neuralert: [%s] transmit %d:%d unsuccessful", __func__, transmission, sequence);
 		return pdTRUE;
 	} else {
-		strcpy(device_id, pUserData->Device_ID);
-		strcpy(timesync, pUserData->MQTT_timesync_current_time_str);
+		strncpy(device_id, pUserData->Device_ID, sizeof(device_id) - 1);
+		device_id[sizeof(device_id) - 1] = '\0';
+		strncpy(timesync, pUserData->MQTT_timesync_current_time_str, sizeof(timesync) - 1);
+		timesync[sizeof(timesync) - 1] = '\0';
 		tx_thres = pUserData->ACCEL_transmit_threshold;
 		xSemaphoreGive(User_semaphore);
 	}
@@ -949,13 +954,14 @@ int send_json_packet(const int count, const unsigned int transmission, const int
 	/*
 	 * JSON preamble
 	 */
-	strcpy(mqttMessage,"{\r\n\t\"state\":\r\n\t{\r\n\t\t\"reported\":\r\n\t\t{\r\n");
+	strncpy(mqttMessage,"{\r\n\t\"state\":\r\n\t{\r\n\t\t\"reported\":\r\n\t\t{\r\n", sizeof(mqttMessage) - 1);
+	mqttMessage[sizeof(mqttMessage) - 1] = '\0';
 	/*
 	 * MAC address of device - stored in retention memory
 	 * during the bootup event
 	 */
-	sprintf(str,"\t\t\t\"id\": \"%s\",\r\n", device_id);
-	strcat(mqttMessage,str);
+	snprintf((char *)str, sizeof(str),"\t\t\t\"id\": \"%s\",\r\n", device_id);
+	strncat(mqttMessage, str, sizeof(mqttMessage) - strlen(mqttMessage) - 1);
 
 
 	/* New timesync field added 1/26/23 per ECO approved by Neuralert
@@ -977,43 +983,43 @@ int send_json_packet(const int count, const unsigned int transmission, const int
 	 *
 	 */
 
-	sprintf(str,"\t\t\t\"timesync\": \"%s\",\r\n", timesync);
-	strcat(mqttMessage,str);
+	snprintf((char *)str, sizeof(str),"\t\t\t\"timesync\": \"%s\",\r\n", timesync);
+	strncat(mqttMessage, str, sizeof(mqttMessage) - strlen(mqttMessage) - 1);
 
 	/* get battery value */
 	int adcData = get_battery_voltage();
-	sprintf(str,"\t\t\t\"bat\": %d,\r\n",adcData);
-	strcat(mqttMessage,str);
+	snprintf((char *)str, sizeof(str),"\t\t\t\"bat\": %d,\r\n",adcData);
+	strncat(mqttMessage, str, sizeof(mqttMessage) - strlen(mqttMessage) - 1);
 
 	// META FIELD DEFINITIONS HERE
 	// Meta data field -- a json for whatever we want.
-	strcat(mqttMessage,"\t\t\t\"meta\":\r\n\t\t\t{\r\n");
+	strncat(mqttMessage, "\t\t\t\"meta\":\r\n\t\t\t{\r\n", sizeof(mqttMessage) - strlen(mqttMessage) - 1);
 	/*
 	 * Meta - MAC address of device - stored in retention memory
 	 * during the bootup event
 	 */
-	sprintf(str,"\t\t\t\t\"id\": \"%s\",\r\n",device_id);
-	strcat(mqttMessage,str);
+	snprintf((char *)str, sizeof(str),"\t\t\t\t\"id\": \"%s\",\r\n",device_id);
+	strncat(mqttMessage, str, sizeof(mqttMessage) - strlen(mqttMessage) - 1);
 	/*
 	* Meta - Firmware Version
 	*/
-	sprintf(str,"\t\t\t\t\"ver\": \"%s\",\r\n", USER_VERSION_STRING);
-	strcat(mqttMessage, str);
+	snprintf((char *)str, sizeof(str),"\t\t\t\t\"ver\": \"%s\",\r\n", USER_VERSION_STRING);
+	strncat(mqttMessage, str, sizeof(mqttMessage) - strlen(mqttMessage) - 1);
 	/*
 	 * Meta - Transmission sequence #
 	 */
-	sprintf(str,"\t\t\t\t\"trans\": %d,\r\n", transmission);
-	strcat(mqttMessage, str);
+	snprintf((char *)str, sizeof(str),"\t\t\t\t\"trans\": %d,\r\n", transmission);
+	strncat(mqttMessage, str, sizeof(mqttMessage) - strlen(mqttMessage) - 1);
 	/*
 	 * Meta - Message sequence this transmission
 	 */
-	sprintf(str,"\t\t\t\t\"seq\": %d,\r\n", sequence);
-	strcat(mqttMessage, str);
+	snprintf((char *)str, sizeof(str),"\t\t\t\t\"seq\": %d,\r\n", sequence);
+	strncat(mqttMessage, str, sizeof(mqttMessage) - strlen(mqttMessage) - 1);
 	/*
 	* Meta - Battery value this transmission
 	*/
-	sprintf(str,"\t\t\t\t\"bat\": %d,\r\n",adcData);
-	strcat(mqttMessage, str);
+	snprintf((char *)str, sizeof(str),"\t\t\t\t\"bat\": %d,\r\n",adcData);
+	strncat(mqttMessage, str, sizeof(mqttMessage) - strlen(mqttMessage) - 1);
 
 
 	/*
@@ -1021,79 +1027,79 @@ int send_json_packet(const int count, const unsigned int transmission, const int
 	*/
 	__time64_t current_time;
 	user_time64_msec_since_poweron(&current_time);
-	sprintf(str,"\t\t\t\t\"mins\": %ld,\r\n", (uint32_t)(current_time/60000));
-	strcat(mqttMessage, str);
+	snprintf((char *)str, sizeof(str),"\t\t\t\t\"mins\": %ld,\r\n", (uint32_t)(current_time/60000));
+	strncat(mqttMessage, str, sizeof(mqttMessage) - strlen(mqttMessage) - 1);
 
 	/*
 	* Meta - rssi value at this transmission
 	*/
 	int rssi = get_current_rssi(WLAN0_IFACE);
-	sprintf(str,"\t\t\t\t\"rssi\": %d,\r\n", rssi);
-	strcat(mqttMessage, str);
+	snprintf((char *)str, sizeof(str),"\t\t\t\t\"rssi\": %d,\r\n", rssi);
+	strncat(mqttMessage, str, sizeof(mqttMessage) - strlen(mqttMessage) - 1);
 
 	/*
 	* Meta - threshold used for next transmission
 	*/
-	sprintf(str,"\t\t\t\t\"thres\": %d,\r\n", tx_thres);
-	strcat(mqttMessage, str);
+	snprintf((char *)str, sizeof(str),"\t\t\t\t\"thres\": %d,\r\n", tx_thres);
+	strncat(mqttMessage, str, sizeof(mqttMessage) - strlen(mqttMessage) - 1);
 
 	/*
 	 * Meta - Remaining free heap size (to monitor for significant leaks)
 	 */
-	sprintf(str,"\t\t\t\t\"mem\": %d\r\n", xPortGetFreeHeapSize());
-	strcat(mqttMessage, str);
+	snprintf((char *)str, sizeof(str),"\t\t\t\t\"mem\": %d\r\n", xPortGetFreeHeapSize());
+	strncat(mqttMessage, str, sizeof(mqttMessage) - strlen(mqttMessage) - 1);
 
 	// End meta data field (close bracket)
-	strcat(mqttMessage,"\t\t\t},\r\n");
+	strncat(mqttMessage, "\t\t\t},\r\n", sizeof(mqttMessage) - strlen(mqttMessage) - 1);
 
 
 	/*
 	 *  Accelerometer X values
 	 */
-	sprintf(str,"\t\t\t\"accX\": [");
-	strcat(mqttMessage,str);
+	snprintf((char *)str, sizeof(str),"\t\t\t\"accX\": [");
+	strncat(mqttMessage, str, sizeof(mqttMessage) - strlen(mqttMessage) - 1);
 	for(i=0;i<count;i++)
 	{
 		Xvalue = accelXmitData[i].Xvalue;
-		sprintf(str,"%d ",Xvalue);
-		strcat(mqttMessage,str);
+		snprintf((char *)str, sizeof(str),"%d ",Xvalue);
+		strncat(mqttMessage, str, sizeof(mqttMessage) - strlen(mqttMessage) - 1);
 	}
-	sprintf(str,"],\r\n");
-	strcat(mqttMessage,str);
+	snprintf((char *)str, sizeof(str),"],\r\n");
+	strncat(mqttMessage, str, sizeof(mqttMessage) - strlen(mqttMessage) - 1);
 
 	/*
 	 *  Accelerometer Y values
 	 */
-	sprintf(str,"\t\t\t\"accY\": [");
-	strcat(mqttMessage,str);
+	snprintf((char *)str, sizeof(str),"\t\t\t\"accY\": [");
+	strncat(mqttMessage, str, sizeof(mqttMessage) - strlen(mqttMessage) - 1);
 	for(i=0;i<count;i++)
 	{
 		Yvalue = accelXmitData[i].Yvalue;
-		sprintf(str,"%d ",Yvalue);
-		strcat(mqttMessage,str);
+		snprintf((char *)str, sizeof(str),"%d ",Yvalue);
+		strncat(mqttMessage, str, sizeof(mqttMessage) - strlen(mqttMessage) - 1);
 	}
-	sprintf(str,"],\r\n");
-	strcat(mqttMessage,str);
+	snprintf((char *)str, sizeof(str),"],\r\n");
+	strncat(mqttMessage, str, sizeof(mqttMessage) - strlen(mqttMessage) - 1);
 
 	/*
 	 *  Accelerometer Z values
 	 */
-	sprintf(str,"\t\t\t\"accZ\": [");
-	strcat(mqttMessage,str);
+	snprintf((char *)str, sizeof(str),"\t\t\t\"accZ\": [");
+	strncat(mqttMessage, str, sizeof(mqttMessage) - strlen(mqttMessage) - 1);
 	for(i=0;i<count;i++)
 	{
 		Zvalue = accelXmitData[i].Zvalue;
-		sprintf(str,"%d ",Zvalue);
-		strcat(mqttMessage,str);
+		snprintf((char *)str, sizeof(str),"%d ",Zvalue);
+		strncat(mqttMessage, str, sizeof(mqttMessage) - strlen(mqttMessage) - 1);
 	}
-	sprintf(str,"],\r\n");
-	strcat(mqttMessage,str);
+	snprintf((char *)str, sizeof(str),"],\r\n");
+	strncat(mqttMessage, str, sizeof(mqttMessage) - strlen(mqttMessage) - 1);
 
 	/*
 	 *  Timestamps
 	 */
-	sprintf(str,"\t\t\t\"ts\": [");
-	strcat(mqttMessage,str);
+	snprintf((char *)str, sizeof(str),"\t\t\t\"ts\": [");
+	strncat(mqttMessage, str, sizeof(mqttMessage) - strlen(mqttMessage) - 1);
 	// Note - as of 9/2/22 timestamps are in milliseconds,
 	// measured from the time the device was booted.
 	// So the largest expected timestamp will be at 5 days:
@@ -1109,18 +1115,18 @@ int send_json_packet(const int count, const unsigned int transmission, const int
 		uint64_t num1 = ((now/1000000) * 1000000);
 		uint64_t num2 = now - num1;
 		uint32_t num3 = num2;
-		sprintf(nowStr,"%03ld",(long)(now/1000000));
-		sprintf(str2,"%06ld ",num3);
-		strcat(nowStr,str2);
-		strcat(mqttMessage,nowStr);
+		snprintf(nowStr, sizeof(nowStr),"%03ld",(long)(now/1000000));
+		snprintf((char *)str2, sizeof(str2),"%06ld ",num3);
+		strncat(nowStr,str2, sizeof(nowStr) - strlen(nowStr) - 1);
+		strncat(mqttMessage, nowStr, sizeof(mqttMessage) - strlen(mqttMessage) - 1);
 	}
-	sprintf(str,"]\r\n");
-	strcat(mqttMessage,str);
+	snprintf((char *)str, sizeof(str),"]\r\n");
+	strncat(mqttMessage, str, sizeof(mqttMessage) - strlen(mqttMessage) - 1);
 
 	/*
 	 * Closing braces
 	 */
-	strcat(mqttMessage,"\r\n\t\t}\r\n\t}\r\n}\r\n");
+	strncat(mqttMessage, "\r\n\t\t}\r\n\t}\r\n}\r\n", sizeof(mqttMessage) - strlen(mqttMessage) - 1);
 
 	unsigned int packet_len = strlen(mqttMessage);
 	PRINTF("\n Neuralert: [%s]: %d total message length", __func__, packet_len);
@@ -1166,10 +1172,11 @@ void time64_string (char *timestamp_str, const __time64_t *timestamp)
 	uint64_t num2 = timestamp_copy - num1;
 	uint32_t num3 = num2;
 
-	sprintf(nowStr,"%03ld",(uint32_t)(timestamp_copy/1000000));
-	sprintf(str2,"%06ld",num3);
-	strcat(nowStr,str2);
-	strcpy(timestamp_str,nowStr);
+	snprintf(nowStr, sizeof(nowStr), "%03ld",(uint32_t)(timestamp_copy/1000000));
+	snprintf(str2, sizeof(str2), "%06ld",num3);
+	strncat(nowStr, str2, sizeof(nowStr) - strlen(nowStr) - 1);
+	strncpy(timestamp_str, nowStr, 19);
+	timestamp_str[19] = '\0';
 
 }
 
@@ -1199,7 +1206,7 @@ void time64_msec_string (char *time_str, const __time64_t *time_msec)
 	time_minutes = time_minutes % (ULONG)60;
 	time_hours = time_hours % (ULONG)24;
 
-	sprintf(time_str,
+	snprintf(time_str, 64,
 			"%u Days plus %02u:%02u:%02u.%03u",
 		time_days,
 		time_hours,
@@ -1235,7 +1242,7 @@ void time64_seconds_string(char *time_str, const __time64_t *time_msec)
 	PRINTF(" [time64_seconds_string] intermediate tenths before division: %lu", time_tenths);
 	time_tenths = time_tenths / (ULONG)100;
 
-	sprintf(time_str,
+	snprintf(time_str, 64,
 			"%u.%u seconds  %u milliseconds",
 		time_seconds,
 		time_tenths,
@@ -2588,7 +2595,7 @@ static int user_set_ssid(void) {
 	char neuralert_ssid[MAX_SSID_LEN + 3];
 	char tmp_buf[MAX_SSID_LEN] = { 0, };
 
-	sprintf(tmp_buf, "%s", "Neuralert");
+	snprintf(tmp_buf, sizeof(tmp_buf), "%s", "Neuralert");
 	memset(neuralert_ssid, 0, MAX_SSID_LEN + 3);
 
 	if (gen_ssid(tmp_buf, WLAN0_IFACE, 1, neuralert_ssid, sizeof(neuralert_ssid)) == -1) {
@@ -3195,7 +3202,7 @@ static void timesync_snapshot(void)
 	// provisioning the device, and attach the time since power on.
 	// NOTE: this function MUST be called after taking User_semaphore -- there is no semaphore protection
 	// in this function.
-	sprintf(pUserData->MQTT_timesync_current_time_str,
+	snprintf(pUserData->MQTT_timesync_current_time_str, MAX_TIMESYNC_LENGTH,
 			"%s (GMT %+02d:%02d) %s",
 				buf,   da16x_Tzoff() / 3600,   da16x_Tzoff() % 3600, buf2);
 
@@ -3629,7 +3636,8 @@ static int user_process_bootup_event(void)
 		user_reboot();
 	} else {
 		// Store device ID
-		strcpy (pUserData->Device_ID, MACaddr);
+		strncpy(pUserData->Device_ID, MACaddr, sizeof(pUserData->Device_ID) - 1);
+		pUserData->Device_ID[sizeof(pUserData->Device_ID) - 1] = '\0';
 
 		// Initialize the accelerometer timestamp bookkeeping
 		pUserData->last_FIFO_read_time_ms = 0;
@@ -4049,7 +4057,7 @@ static int neuralert_provisioning_step1(const char *_recData, char *reply_buf, u
 			if (strcmp(cur_json->valuestring, USER_PROVISIONING_KEY) == 0) {
 				PRINTF("Provided key matches, reply with device info\r\n");
 
-				*reply_len = sprintf(reply_buf,"{\"software\":\"%s\",\"version\":\"%s\",\"build\":\"%s %s\",\"id\":\"%s\"}",
+				*reply_len = snprintf(reply_buf, *reply_len + 1, "{\"software\":\"%s\",\"version\":\"%s\",\"build\":\"%s %s\",\"id\":\"%s\"}",
 	USER_SOFTWARE_PART_NUMBER_STRING, USER_VERSION_STRING, __DATE__, __TIME__, MACaddr);
 
 			} else {
